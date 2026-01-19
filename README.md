@@ -1,7 +1,7 @@
 # PRISMA per LiITA
 
-**P**attern-based **R**ules for **I**nterrogating Li**ITA** **S**PARQL with **M**ultiple-resource **A**ssembly
 
+**P**attern-based **R**ules for **I**ntent-driven **S**PARQL with **M**ultiple-resource **A**ssembly.
 A transparent NL2SPARQL system for the [LiITA (Linking Italian)](https://liita.it) knowledge base.
 
 ## Overview
@@ -199,17 +199,7 @@ WHERE {
 }
 ```
 
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
 ## License
 
 MIT License - see [LICENSE](LICENSE) for details.
 
-## Acknowledgments
-
-- [LiITA Project](https://liita.it) - Linking Italian linguistic resources
-- [CompL-it](https://compl-it.ilc.cnr.it/) - Computational lexicon for Italian
-- [Sentix](http://valeriobasile.github.io/twita/sentix.html) - Sentiment lexicon
-- [ELIta](https://github.com/GT4SD/ELIta) - Emotion lexicon for Italian
