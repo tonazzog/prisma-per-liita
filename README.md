@@ -2,6 +2,7 @@
 
 
 **P**attern-based **R**ules for **I**ntent-driven **S**PARQL with **M**ultiple-resource **A**ssembly.
+
 A transparent NL2SPARQL system for the [LiITA (Linking Italian)](https://liita.it) knowledge base.
 
 ## Overview

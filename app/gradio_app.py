@@ -44,7 +44,7 @@ EXAMPLE_QUERIES = [
     "Find Sicilian nouns ending in 'ìa'",
     "How many nouns are in LiITA?",
     "Find words whose definition starts with 'uccello'",
-    "What are the synonyms of 'veloce'?",
+    "What are the synonyms of 'origine'?",
     "Find lemmas starting with 'infra'",
 ]
 
@@ -380,7 +380,7 @@ def create_ui() -> gr.Blocks:
         gr.Markdown("""
         # PRISMA per LiITA
 
-        **P**attern-based **R**ules for **I**nterrogating Li**ITA** **S**PARQL with **M**ultiple-resource **A**ssembly
+        **P**attern-based **R**ules for **I**ntent-driven **S**PARQL with **M**ultiple-resource **A**ssembly.
 
         Translate natural language questions into SPARQL queries for the
         [LiITA (Linking Italian)](https://liita.it) linguistic knowledge base.
@@ -410,7 +410,7 @@ def create_ui() -> gr.Blocks:
                     with gr.Column(scale=2):
                         sparql_output = gr.Code(
                             label="Generated SPARQL",
-                            language="sparql",
+                            language="sql",
                             lines=15,
                         )
                         with gr.Row():
@@ -461,7 +461,7 @@ def create_ui() -> gr.Blocks:
 
                 exec_sparql_input = gr.Code(
                     label="SPARQL Query",
-                    language="sparql",
+                    language="sql",
                     lines=12,
                     value="""PREFIX ontolex: <http://www.w3.org/ns/lemon/ontolex#>
 PREFIX lila: <http://lila-erc.eu/ontologies/lila/>
@@ -556,7 +556,7 @@ LIMIT 10""",
         gr.Markdown("""
         ---
         **PRISMA per LiITA** - Pattern-based Rules for Intent-driven SPARQL with Multiple-resource Assembly |
-        [GitHub](https://github.com/yourusername/prisma-per-liita)
+        [GitHub](https://github.com/tonazzog/prisma-per-liita)
         """)
 
     return app
@@ -617,6 +617,7 @@ def main():
     app.launch(
         share=args.share,
         server_port=args.port,
+        theme=gr.themes.Soft(),
     )
 
 

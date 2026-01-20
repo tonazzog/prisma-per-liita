@@ -366,21 +366,7 @@ class PatternAssembler:
                 fragment = tool.generate(**step.parameters)
                 fragments.append(fragment)
             except Exception as e:
-                warnings.append(f"Error generating {step.tool_name}: {str(e)}")
-        
-        # CRITICAL FIX: Inject pattern filter for Parmigiano searches
-        if plan.metadata.get('needs_filter_injection'):
-            pattern = plan.metadata.get('pattern')
-            if pattern and len(fragments) >= 2:
-                # Find the Parmigiano translation fragment
-                for i, frag in enumerate(fragments):
-                    if 'parmigiano_translation' in frag.pattern_name:
-                        # Inject FILTER into the fragment's SPARQL
-                        # This is a workaround until we have a dedicated tool
-                        pattern_filter = f"\n  FILTER(regex(str(?parmigianoWR), \"{pattern}$\")) ."
-                        fragments[i].sparql = fragments[i].sparql.rstrip() + pattern_filter
-                        warnings.append(f"Injected pattern filter: {pattern}")
-                        break
+                warnings.append(f"Error generating {step.tool_name}: {str(e)}")       
         
         return fragments, warnings
     

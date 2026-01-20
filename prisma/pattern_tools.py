@@ -396,7 +396,125 @@ class CompLitSemanticRelationPattern(PatternTool):
 
 
 # ============================================================================
-# PATTERN TOOL 2b: CompL-it Semantic Relation Between Two Lemmas
+# PATTERN TOOL 2b: CompL-it Word Sense Lookup
+# ============================================================================
+
+class CompLitWordSenseLookupPattern(PatternTool):
+    """
+    Looks up a word in CompL-it by its written form and retrieves all its senses
+    with their definitions.
+
+    Use Case: "Find all senses of the word 'vita'"
+
+    Template guarantees:
+    - Proper SERVICE clause structure
+    - Complete sense and definition retrieval
+    - Optional POS filtering
+    """
+
+    @property
+    def name(self) -> str:
+        return "complit_word_sense_lookup"
+
+    @property
+    def description(self) -> str:
+        return "Look up a word in CompL-it and retrieve all its senses and definitions"
+
+    def get_input_schema(self) -> Dict:
+        return {
+            "type": "object",
+            "required": ["lemma"],
+            "properties": {
+                "lemma": {
+                    "type": "string",
+                    "description": "The word to look up (written form)"
+                },
+                "pos": {
+                    "type": "string",
+                    "enum": ["noun", "verb", "adjective", "adverb"],
+                    "description": "Optional part-of-speech filter"
+                },
+                "retrieve_examples": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Whether to retrieve usage examples"
+                }
+            }
+        }
+
+    def generate(self, **kwargs) -> PatternFragment:
+        lemma = kwargs["lemma"]
+        pos = kwargs.get("pos")
+        retrieve_examples = kwargs.get("retrieve_examples", False)
+
+        # Build POS clause if specified
+        pos_clause = ""
+        pos_filter = ""
+        if pos:
+            pos_clause = "lexinfo:partOfSpeech [ rdfs:label ?pos ] ;"
+            pos_filter = f'\n    FILTER(str(?pos) = "{pos}") .'
+
+        # Build example retrieval if requested
+        example_clause = ""
+        if retrieve_examples:
+            example_clause = """
+    OPTIONAL {
+      ?sense lexinfo:senseExample ?example
+    } ."""
+
+        sparql = f"""
+  SERVICE <https://klab.ilc.cnr.it/graphdb-compl-it/> {{
+    ?word a ontolex:Word ;
+          {pos_clause}
+          ontolex:sense ?sense ;
+          ontolex:canonicalForm ?form .
+    ?form ontolex:writtenRep ?lemma .
+    OPTIONAL {{
+      ?sense skos:definition ?definition
+    }} .{example_clause}
+    FILTER(str(?lemma) = "{lemma}") .{pos_filter}
+  }}"""
+
+        # Define output variables
+        output_vars = [
+            Variable("?word", VariableType.WORD, "complit",
+                    description="CompL-it word entry"),
+            Variable("?lemma", VariableType.LEMMA, "complit",
+                    description="Written representation of lemma"),
+            Variable("?sense", VariableType.SENSE, "complit",
+                    description="Lexical sense"),
+            Variable("?definition", VariableType.DEFINITION, "complit",
+                    optional=True, description="Definition text")
+        ]
+
+        if retrieve_examples:
+            output_vars.append(
+                Variable("?example", VariableType.WRITTEN_REP, "complit",
+                        optional=True, description="Usage example")
+            )
+
+        filters = ["lemma"]
+        if pos:
+            filters.append("pos")
+
+        return PatternFragment(
+            pattern_name=self.name,
+            sparql=sparql,
+            input_vars=[],  # No inputs - this is a starting pattern
+            output_vars=output_vars,
+            required_prefixes={"ontolex", "lexinfo", "rdfs", "skos"},
+            filters_applied=filters,
+            needs_service_clause=True,
+            metadata={
+                "query_type": "word_sense_lookup",
+                "lemma": lemma,
+                "pos": pos
+            }
+        )
+
+
+# ============================================================================
+# PATTERN TOOL 2c: CompL-it Semantic Relation Between Two Lemmas
 # ============================================================================
 
 class CompLitRelationBetweenLemmasPattern(PatternTool):
@@ -822,9 +940,9 @@ class SicilianPatternSearchPattern(PatternTool):
         pos_clause = ""
         pos_filter = ""
         if pos:
-            pos_clause = "lila:hasPOS ?pos ;"
-            pos_filter = f"  FILTER(?pos = lila:{pos}) ."
-        
+            pos_clause = "\n                 lila:hasPOS ?pos ."
+            pos_filter = f"\n  FILTER(?pos = lila:{pos}) ."
+
         # Italian linking clause
         italian_clause = ""
         if link_to_italian:
@@ -833,12 +951,18 @@ class SicilianPatternSearchPattern(PatternTool):
   ?leItalian vartrans:translatableAs ?leSicilian ;
              ontolex:canonicalForm ?liitaLemma .
   ?liitaLemma ontolex:writtenRep ?italianWR ."""
-        
-        sparql = f"""
+
+        # Build the base triple pattern - end with . if no pos_clause, else with ;
+        if pos:
+            sparql = f"""
   ?sicilianLemma dcterms:isPartOf <http://liita.it/data/id/DialettoSiciliano/lemma/LemmaBank> ;
-                 ontolex:writtenRep ?sicilianWR ;
-                 {pos_clause}
+                 ontolex:writtenRep ?sicilianWR ;{pos_clause}
   FILTER(regex(str(?sicilianWR), "{pattern}")) .{pos_filter}{italian_clause}"""
+        else:
+            sparql = f"""
+  ?sicilianLemma dcterms:isPartOf <http://liita.it/data/id/DialettoSiciliano/lemma/LemmaBank> ;
+                 ontolex:writtenRep ?sicilianWR .
+  FILTER(regex(str(?sicilianWR), "{pattern}")) .{italian_clause}"""
         
         output_vars = [
             Variable("?sicilianLemma", VariableType.LEMMA, "sicilian",
@@ -1160,16 +1284,11 @@ class ItalianWrittenRepPattern(PatternTool):
 
 class ParmigianoPatternSearchPattern(PatternTool):
     """
-    Searches Parmigiano lemmas by written form pattern, then links to Italian.
+    Searches Parmigiano lemmas by written form pattern, then optionally
+    links to Italian translations.
     
-    Use Case: "Find Parmigiano words ending in 'u'"
+    Use Case: "Find Parmigiano words ending in 'ìa'"
     
-    This is the reverse of ParmigianoTranslationPattern - it starts from
-    Parmigiano rather than Italian.
-    
-    NOTE: This requires querying all Italian-Parmigiano pairs and filtering,
-    which is less efficient than Sicilian pattern search (which has its own
-    lemma bank). This is a limitation of the current LiITA structure.
     """
     
     @property
@@ -1178,7 +1297,7 @@ class ParmigianoPatternSearchPattern(PatternTool):
     
     @property
     def description(self) -> str:
-        return "Search Parmigiano lemmas by pattern, link to Italian"
+        return "Search Parmigiano lemmas by pattern, optionally link to Italian"
     
     def get_input_schema(self) -> Dict:
         return {
@@ -1192,7 +1311,7 @@ class ParmigianoPatternSearchPattern(PatternTool):
                 "pos": {
                     "type": "string",
                     "enum": ["noun", "verb", "adjective", "adverb"],
-                    "description": "Optional POS filter for Italian lemmas"
+                    "description": "Optional POS filter"
                 },
                 "link_to_italian": {
                     "type": "boolean",
@@ -1207,42 +1326,48 @@ class ParmigianoPatternSearchPattern(PatternTool):
         pos = kwargs.get("pos")
         link_to_italian = kwargs.get("link_to_italian", True)
         
-        # POS filter clause for Italian side
+        # POS filter clause
         pos_clause = ""
+        pos_filter = ""
         if pos:
-            pos_clause = f"  ?liitaLemma lila:hasPOS lila:{pos} ."
-        
-        # Build the query
-        # We need to traverse: Italian LE -> Parmigiano LE -> Parmigiano Lemma -> WR
-        # Then filter by pattern
-        
-        sparql = f"""
-  ?leItalian ontolex:canonicalForm ?liitaLemma ;
-             ^lime:entry <http://liita.it/data/id/LexicalReources/DialettoParmigiano/Lexicon> .
-{pos_clause}
-  ?leItalian vartrans:translatableAs ?leParmigiano .
-  ?leParmigiano ontolex:canonicalForm ?parmigianoLemma .
-  ?parmigianoLemma ontolex:writtenRep ?parmigianoWR .
-  FILTER(regex(str(?parmigianoWR), "{pattern}")) ."""
-        
-        # Optionally include Italian written rep
+            pos_clause = "\n                 lila:hasPOS ?pos ."
+            pos_filter = f"\n  FILTER(?pos = lila:{pos}) ."
+
+        # Italian linking clause
+        italian_clause = ""
         if link_to_italian:
-            sparql += "\n  ?liitaLemma ontolex:writtenRep ?italianWR ."
+            italian_clause = """
+  ?leParmigiano ontolex:canonicalForm ?parmigianoLemma .
+  ?leItalian vartrans:translatableAs ?leParmigiano ;
+             ontolex:canonicalForm ?liitaLemma .
+  ?liitaLemma ontolex:writtenRep ?italianWR ."""
+
+        # Build the base triple pattern - end with . if no pos_clause, else with ;
+        if pos:
+            sparql = f"""
+  ?parmigianoLemma dcterms:isPartOf <http://liita.it/data/id/DialettoParmigiano/lemma/LemmaBank> ;
+                 ontolex:writtenRep ?parmigianoWR ;{pos_clause}
+  FILTER(regex(str(?parmigianoWR), "{pattern}")) .{pos_filter}{italian_clause}"""
+        else:
+            sparql = f"""
+  ?parmigianoLemma dcterms:isPartOf <http://liita.it/data/id/DialettoParmigiano/lemma/LemmaBank> ;
+                 ontolex:writtenRep ?parmigianoWR .
+  FILTER(regex(str(?parmigianoWR), "{pattern}")) .{italian_clause}"""
         
         output_vars = [
             Variable("?parmigianoLemma", VariableType.LEMMA, "parmigiano",
                     description="Parmigiano lemma matching pattern"),
             Variable("?parmigianoWR", VariableType.WRITTEN_REP, "parmigiano",
-                    description="Parmigiano written representation"),
-            Variable("?liitaLemma", VariableType.LEMMA, "liita",
-                    description="Italian lemma")
+                    description="Parmigiano written representation")
         ]
         
         if link_to_italian:
-            output_vars.append(
+            output_vars.extend([
+                Variable("?liitaLemma", VariableType.LEMMA, "liita",
+                        description="Italian translation lemma"),
                 Variable("?italianWR", VariableType.WRITTEN_REP, "liita",
                         description="Italian written representation")
-            )
+            ])
         
         filters = ["parmigiano_pattern"]
         if pos:
@@ -1253,7 +1378,7 @@ class ParmigianoPatternSearchPattern(PatternTool):
             sparql=sparql,
             input_vars=[],
             output_vars=output_vars,
-            required_prefixes={"ontolex", "lime", "vartrans", "lila"},
+            required_prefixes={"ontolex", "dcterms", "lila", "vartrans"},
             filters_applied=filters,
             needs_service_clause=False,
             metadata={
@@ -1262,6 +1387,7 @@ class ParmigianoPatternSearchPattern(PatternTool):
                 "pattern": pattern
             }
         )
+
     
 # ============================================================================
 # PATTERN TOOL 11: Sentix Linking Pattern
@@ -1594,6 +1720,7 @@ class PatternToolRegistry:
         tools = [
             CompLitDefinitionSearchPattern(),
             CompLitSemanticRelationPattern(),
+            CompLitWordSenseLookupPattern(),
             CompLitRelationBetweenLemmasPattern(),
             BridgePattern(),
             ParmigianoTranslationPattern(),
@@ -1625,7 +1752,7 @@ class PatternToolRegistry:
     def get_tools_by_category(self, category: str) -> List[PatternTool]:
         """Get tools by category (complit, dialect, basic, etc.)"""
         category_map = {
-            "complit": ["complit_definition_search", "complit_semantic_relation"],
+            "complit": ["complit_definition_search", "complit_semantic_relation", "complit_word_sense_lookup", "complit_relation_between_lemmas"],
             "bridge": ["bridge_complit_to_liita"],
             "dialect": [
                 "parmigiano_translation", 

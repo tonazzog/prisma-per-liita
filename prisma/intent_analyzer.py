@@ -48,6 +48,7 @@ Your ONLY task is to analyze natural language queries about Italian linguistics 
 
 3. **Parmigiano Lexicon** (Local)
    - Italian ↔ Parmigiano dialect translations
+   - Pattern-based searching available
    - Linked via LiITA lemmas
 
 4. **Sicilian Lexicon** (Local)
@@ -89,27 +90,31 @@ Classify queries into ONE of these types:
    - Check if a specific relation exists between two lemmas
    - Examples: "Are 'cane' and 'animale' related?", "Is 'rosso' a hyponym of 'colore'?"
 
-5. **dialect_pattern_search**
-   - Pattern-based search in dialect (usually Sicilian)
-   - Examples: "Sicilian words ending in ìa"
+5. **complit_word_sense_lookup**
+   - Look up a word by its written form and retrieve all its senses with definitions
+   - Examples: "Find all senses of the word 'vita'", "What are the meanings of 'piano'?"
 
-6. **dialect_translation**
+6. **dialect_pattern_search**
+   - Pattern-based search in dialect (Sicilian or Parmigiano)
+   - Examples: "Sicilian words ending in ìa", "Parmigiano words ending in 'u'"
+
+7. **dialect_translation**
    - Translate specific words between Italian and dialects
    - Examples: "Translate casa to Parmigiano"
 
-7. **multi_resource**
+8. **multi_resource**
    - Complex queries combining CompL-it with dialects
    - Examples: "Hyponyms of X with Parmigiano translations"
 
-8. **sentix_polarity**
+9. **sentix_polarity**
    - Queries about sentiment/polarity of words using Sentix
    - Examples: "What is the polarity of 'amore'?", "Find positive words", "Sentiment of 'guerra'"
 
-9. **elita_emotion**
+10. **elita_emotion**
    - Queries about emotions associated with words using ELIta
    - Examples: "What emotion is associated with 'felicità'?", "Find words with joy emotion"
 
-10. **affective_multi_resource**
+11. **affective_multi_resource**
    - Complex queries combining Sentix/ELIta with other resources
    - Examples: "Find positive words with their definitions", "Emotions of color hyponyms"
 
@@ -128,7 +133,7 @@ You must output valid JSON with this exact structure:
 
 ```json
 {
-  "query_type": "one of: basic_lemma_lookup | complit_definitions | complit_semantic | complit_relation_check | dialect_pattern_search | dialect_translation | multi_resource | sentix_polarity | elita_emotion | affective_multi_resource",
+  "query_type": "one of: basic_lemma_lookup | complit_definitions | complit_semantic | complit_relation_check | complit_word_sense_lookup | dialect_pattern_search | dialect_translation | multi_resource | sentix_polarity | elita_emotion | affective_multi_resource",
   "required_resources": ["array of: liita_lemma_bank | complit | parmigiano | sicilian | sentix | elita"],
   "lemma": "specific lemma mentioned (or null)",
   "lemma_b": "second lemma for relation checking queries (or null)",
@@ -161,7 +166,11 @@ You must output valid JSON with this exact structure:
 
 1. **Always output valid JSON** - no markdown, no explanations outside JSON
 2. **Use exact enum values** - no variations or synonyms
-3. **Set aggregation to null if not needed** - don't guess
+3. **Aggregation only when EXPLICITLY requested** - Set aggregation to null unless the user explicitly asks for:
+   - "count" / "how many" → use count aggregation
+   - "group" / "grouped" → use group_concat aggregation
+   - DO NOT add aggregation just for "readability" or to be "helpful"
+   - Simple listing queries (e.g., "Find hyponyms of X") do NOT need aggregation
 4. **Be conservative with complexity_score** - prefer lower scores
 5. **Include reasoning** - helps debugging
 
@@ -200,6 +209,60 @@ INTENT_EXAMPLES = [
             "complexity_score": 1,
             "user_query": "How many nouns are in LiITA?",
             "reasoning": "Simple count aggregation on LiITA lemmas filtered by POS"
+        }
+    },
+    {
+        "query": "How many Parmigiano nouns are there?",
+        "intent": {
+            "query_type": "dialect_pattern_search",
+            "required_resources": ["parmigiano"],
+            "lemma": None,
+            "pos": "noun",
+            "definition_pattern": None,
+            "pattern_type": None,
+            "written_form_pattern": ".*",
+            "semantic_relation": None,
+            "filters": [],
+            "aggregation": {
+                "type": "count",
+                "aggregate_var": None,
+                "group_by_vars": [],
+                "separator": None,
+                "order_by": None
+            },
+            "retrieve_definitions": False,
+            "retrieve_examples": False,
+            "include_italian_written_rep": False,
+            "complexity_score": 2,
+            "user_query": "How many Parmigiano nouns are there?",
+            "reasoning": "Count dialect lemmas - only parmigiano resource needed, NOT liita_lemma_bank. Use dialect_pattern_search with wildcard pattern."
+        }
+    },
+    {
+        "query": "How many Sicilian verbs are there?",
+        "intent": {
+            "query_type": "dialect_pattern_search",
+            "required_resources": ["sicilian"],
+            "lemma": None,
+            "pos": "verb",
+            "definition_pattern": None,
+            "pattern_type": None,
+            "written_form_pattern": ".*",
+            "semantic_relation": None,
+            "filters": [],
+            "aggregation": {
+                "type": "count",
+                "aggregate_var": None,
+                "group_by_vars": [],
+                "separator": None,
+                "order_by": None
+            },
+            "retrieve_definitions": False,
+            "retrieve_examples": False,
+            "include_italian_written_rep": False,
+            "complexity_score": 2,
+            "user_query": "How many Sicilian verbs are there?",
+            "reasoning": "Count dialect lemmas - only sicilian resource needed. Use dialect_pattern_search with wildcard pattern and count aggregation."
         }
     },
     {
@@ -327,7 +390,70 @@ INTENT_EXAMPLES = [
             "include_italian_written_rep": True,
             "complexity_score": 3,
             "user_query": "What are the hyponyms of 'colore' in CompL-it?",
-            "reasoning": "Semantic relation navigation (hyponyms) for specific lemma"
+            "reasoning": "Semantic relation navigation (hyponyms) for specific lemma. NO aggregation needed - just list the hyponyms."
+        }
+    },
+    {
+        "query": "Find the hyponyms of 'animale'",
+        "intent": {
+            "query_type": "complit_semantic",
+            "required_resources": ["complit", "liita_lemma_bank"],
+            "lemma": "animale",
+            "pos": "noun",
+            "definition_pattern": None,
+            "pattern_type": None,
+            "written_form_pattern": None,
+            "semantic_relation": "hyponym",
+            "filters": [],
+            "aggregation": None,
+            "retrieve_definitions": True,
+            "retrieve_examples": False,
+            "include_italian_written_rep": True,
+            "complexity_score": 3,
+            "user_query": "Find the hyponyms of 'animale'",
+            "reasoning": "Simple semantic query - list hyponyms without aggregation. User did NOT ask for grouping or counting."
+        }
+    },
+    {
+        "query": "Find all senses of the word 'vita'",
+        "intent": {
+            "query_type": "complit_word_sense_lookup",
+            "required_resources": ["complit"],
+            "lemma": "vita",
+            "pos": None,
+            "definition_pattern": None,
+            "pattern_type": None,
+            "written_form_pattern": None,
+            "semantic_relation": None,
+            "filters": [],
+            "aggregation": None,
+            "retrieve_definitions": True,
+            "retrieve_examples": False,
+            "include_italian_written_rep": True,
+            "complexity_score": 2,
+            "user_query": "Find all senses of the word 'vita'",
+            "reasoning": "Word sense lookup in CompL-it - retrieve all senses and definitions for a specific lemma"
+        }
+    },
+    {
+        "query": "What are the meanings of the noun 'piano'?",
+        "intent": {
+            "query_type": "complit_word_sense_lookup",
+            "required_resources": ["complit"],
+            "lemma": "piano",
+            "pos": "noun",
+            "definition_pattern": None,
+            "pattern_type": None,
+            "written_form_pattern": None,
+            "semantic_relation": None,
+            "filters": [],
+            "aggregation": None,
+            "retrieve_definitions": True,
+            "retrieve_examples": False,
+            "include_italian_written_rep": True,
+            "complexity_score": 2,
+            "user_query": "What are the meanings of the noun 'piano'?",
+            "reasoning": "Word sense lookup with POS filter - retrieve all noun senses and definitions"
         }
     },
     {
@@ -363,22 +489,40 @@ INTENT_EXAMPLES = [
             "written_form_pattern": None,
             "semantic_relation": "hyponym",
             "filters": [],
-            "aggregation": {
-                "type": "group_concat",
-                "aggregate_var": "definition",
-                "group_by_vars": ["relatedSense", "liitaLemma", "parmigianoLemma", "parmigianoWR"],
-                "separator": "; ",
-                "order_by": {
-                    "var": "parmigianoWR",
-                    "direction": "ASC"
-                }
-            },
+            "aggregation": None,
             "retrieve_definitions": True,
             "retrieve_examples": False,
             "include_italian_written_rep": True,
-            "complexity_score": 5,
+            "complexity_score": 4,
             "user_query": "Find hyponyms of 'colore' with Parmigiano translations",
-            "reasoning": "Complex multi-resource: semantic relations + dialect translation + aggregation"
+            "reasoning": "Multi-resource: semantic relations + dialect translation. NO aggregation - user just wants a list."
+        }
+    },
+    {
+        "query": "Count how many hyponyms 'animale' has",
+        "intent": {
+            "query_type": "complit_semantic",
+            "required_resources": ["complit", "liita_lemma_bank"],
+            "lemma": "animale",
+            "pos": "noun",
+            "definition_pattern": None,
+            "pattern_type": None,
+            "written_form_pattern": None,
+            "semantic_relation": "hyponym",
+            "filters": [],
+            "aggregation": {
+                "type": "count",
+                "aggregate_var": None,
+                "group_by_vars": [],
+                "separator": None,
+                "order_by": None
+            },
+            "retrieve_definitions": False,
+            "retrieve_examples": False,
+            "include_italian_written_rep": False,
+            "complexity_score": 3,
+            "user_query": "Count how many hyponyms 'animale' has",
+            "reasoning": "User explicitly asked to COUNT - use count aggregation"
         }
     },
     {
@@ -393,19 +537,34 @@ INTENT_EXAMPLES = [
             "written_form_pattern": "ìa$",
             "semantic_relation": None,
             "filters": [],
-            "aggregation": {
-                "type": "group_concat",
-                "aggregate_var": "sicilianWR",
-                "group_by_vars": ["sicilianLemma", "liitaLemma"],
-                "separator": ", ",
-                "order_by": None
-            },
+            "aggregation": None,
             "retrieve_definitions": False,
             "retrieve_examples": False,
             "include_italian_written_rep": True,
             "complexity_score": 3,
             "user_query": "Find Sicilian nouns ending in 'ìa' and their Italian translations",
-            "reasoning": "Pattern-based Sicilian search with Italian linking"
+            "reasoning": "Pattern-based Sicilian search with Italian linking. NO aggregation - just list results."
+        }
+    },
+    {
+        "query": "Find Parmigiano nouns ending in 'u' and their Italian translations",
+        "intent": {
+            "query_type": "dialect_pattern_search",
+            "required_resources": ["parmigiano", "liita_lemma_bank"],
+            "lemma": None,
+            "pos": "noun",
+            "definition_pattern": None,
+            "pattern_type": None,
+            "written_form_pattern": "u$",
+            "semantic_relation": None,
+            "filters": [],
+            "aggregation": None,
+            "retrieve_definitions": False,
+            "retrieve_examples": False,
+            "include_italian_written_rep": True,
+            "complexity_score": 3,
+            "user_query": "Find Parmigiano nouns ending in 'u' and their Italian translations",
+            "reasoning": "Pattern-based Parmigiano search with Italian linking. NO aggregation - just list results."
         }
     },
     {
@@ -772,8 +931,9 @@ class IntentAnalyzer:
         # Validate query_type
         valid_query_types = [
             'basic_lemma_lookup', 'complit_definitions', 'complit_semantic',
-            'complit_relation_check', 'dialect_pattern_search', 'dialect_translation',
-            'multi_resource', 'sentix_polarity', 'elita_emotion', 'affective_multi_resource'
+            'complit_relation_check', 'complit_word_sense_lookup', 'dialect_pattern_search',
+            'dialect_translation', 'multi_resource', 'sentix_polarity', 'elita_emotion',
+            'affective_multi_resource'
         ]
         if 'query_type' in intent_dict:
             if intent_dict['query_type'] not in valid_query_types:

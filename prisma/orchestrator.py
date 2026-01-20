@@ -30,6 +30,7 @@ class QueryType(Enum):
     COMPLIT_SEMANTIC = "complit_semantic"
     COMPLIT_DEFINITIONS = "complit_definitions"
     COMPLIT_RELATION_CHECK = "complit_relation_check"  # Check relation between two lemmas
+    COMPLIT_WORD_SENSE_LOOKUP = "complit_word_sense_lookup"  # Look up word senses/definitions
     DIALECT_TRANSLATION = "dialect_translation"
     DIALECT_PATTERN_SEARCH = "dialect_pattern_search"
     MULTI_RESOURCE = "multi_resource"
@@ -170,7 +171,12 @@ class OrchestratorRules:
         """Determine which dialect translation tools are needed"""
         tools = []
         if ResourceType.PARMIGIANO in intent.required_resources:
-            tools.append("parmigiano_translation")
+            # Check if starting from Parmigiano or Italian
+            if intent.query_type == QueryType.DIALECT_PATTERN_SEARCH:
+                tools.append("parmigiano_pattern_search")
+            else:
+                # Translation from Italian to Parmigiano
+                tools.append("parmigiano_translation")
         if ResourceType.SICILIAN in intent.required_resources:
             # Check if starting from Sicilian or Italian
             if intent.query_type == QueryType.DIALECT_PATTERN_SEARCH:
@@ -195,6 +201,28 @@ class PatternOrchestrator:
 
     def __init__(self):
         self.rules = OrchestratorRules()
+
+    # ========================================================================
+    # Helper Methods
+    # ========================================================================
+
+    def _transform_aggregation_params(self, aggregation: Optional[Dict]) -> Optional[Dict]:
+        """
+        Transform aggregation parameters from intent format to pattern tool format.
+
+        Intent format uses 'type' but AggregationPattern expects 'aggregation_type'.
+        """
+        if not aggregation:
+            return None
+
+        # Create a copy to avoid modifying the original
+        params = dict(aggregation)
+
+        # Transform 'type' to 'aggregation_type' if needed
+        if 'type' in params and 'aggregation_type' not in params:
+            params['aggregation_type'] = params.pop('type')
+
+        return params
 
     # ========================================================================
     # Component-Based Planning Helpers
@@ -401,16 +429,19 @@ class PatternOrchestrator:
         if intent.query_type == QueryType.BASIC_LEMMA_LOOKUP:
             # Check if this is really a dialect query misclassified as basic lookup
             dialect_resources = [r for r in intent.required_resources if r in [ResourceType.PARMIGIANO, ResourceType.SICILIAN]]
+
+            # Route to dialect pattern search if:
+            # 1. There's a dialect resource AND a written_form_pattern (pattern search)
+            # 2. OR there's ONLY dialect resources (no LIITA, no COMPLIT)
+            has_pattern = intent.written_form_pattern is not None
             has_only_dialect = dialect_resources and ResourceType.LIITA not in intent.required_resources and ResourceType.COMPLIT not in intent.required_resources
-            
-            if has_only_dialect:
+
+            if dialect_resources and (has_pattern or has_only_dialect):
                 # This is actually a dialect pattern search, not a basic LiITA lookup
                 # Reclassify and route to correct planner
-                if ResourceType.SICILIAN in dialect_resources:
-                    return self._plan_dialect_pattern_search(intent)
-                elif ResourceType.PARMIGIANO in dialect_resources:
-                    return self._plan_parmigiano_pattern_search(intent)
-            
+                return self._plan_dialect_pattern_search(intent)
+
+
             return self._plan_basic_lookup(intent)
         
         elif intent.query_type == QueryType.COMPLIT_DEFINITIONS:
@@ -421,6 +452,9 @@ class PatternOrchestrator:
 
         elif intent.query_type == QueryType.COMPLIT_RELATION_CHECK:
             return self._plan_complit_relation_check(intent)
+
+        elif intent.query_type == QueryType.COMPLIT_WORD_SENSE_LOOKUP:
+            return self._plan_complit_word_sense_lookup(intent)
 
         elif intent.query_type == QueryType.DIALECT_PATTERN_SEARCH:
             return self._plan_dialect_pattern_search(intent)
@@ -477,7 +511,7 @@ class PatternOrchestrator:
         if intent.aggregation:
             steps.append(PatternStep(
                 tool_name="aggregation",
-                parameters=intent.aggregation,
+                parameters=self._transform_aggregation_params(intent.aggregation),
                 step_number=step_num,
                 description=f"Apply {intent.aggregation['type']} aggregation",
                 depends_on=[1]
@@ -548,7 +582,7 @@ class PatternOrchestrator:
         if intent.aggregation:
             steps.append(PatternStep(
                 tool_name="aggregation",
-                parameters=intent.aggregation,
+                parameters=self._transform_aggregation_params(intent.aggregation),
                 step_number=step_num,
                 description=f"Apply {intent.aggregation['type']} aggregation",
                 depends_on=[i for i in range(1, step_num)]
@@ -637,7 +671,7 @@ class PatternOrchestrator:
         if intent.aggregation:
             steps.append(PatternStep(
                 tool_name="aggregation",
-                parameters=intent.aggregation,
+                parameters=self._transform_aggregation_params(intent.aggregation),
                 step_number=step_num,
                 description=f"Apply {intent.aggregation['type']} aggregation",
                 depends_on=[i for i in range(1, step_num)]
@@ -698,6 +732,56 @@ class PatternOrchestrator:
             }
         )
 
+    def _plan_complit_word_sense_lookup(self, intent: Intent) -> ExecutionPlan:
+        """
+        Plan for looking up a word in CompL-it and retrieving all its senses and definitions.
+
+        Example: "Find all senses of the word 'vita'"
+        Example: "What are the meanings of 'piano'?"
+
+        Pattern sequence:
+        1. CompL-it word sense lookup (SERVICE)
+        2. Optional: Aggregation
+        """
+        steps = []
+        step_num = 1
+
+        # Step 1: CompL-it word sense lookup (SERVICE)
+        params = {
+            "lemma": intent.lemma,
+            "retrieve_examples": intent.retrieve_examples
+        }
+        if intent.pos:
+            params["pos"] = intent.pos
+
+        steps.append(PatternStep(
+            tool_name="complit_word_sense_lookup",
+            parameters=params,
+            step_number=step_num,
+            description=f"Look up all senses and definitions of '{intent.lemma}' in CompL-it",
+        ))
+        step_num += 1
+
+        # Step 2: Aggregation (if needed)
+        if intent.aggregation:
+            steps.append(PatternStep(
+                tool_name="aggregation",
+                parameters=self._transform_aggregation_params(intent.aggregation),
+                step_number=step_num,
+                description=f"Apply {intent.aggregation['type']} aggregation",
+                depends_on=[1]
+            ))
+
+        return ExecutionPlan(
+            steps=steps,
+            intent=intent,
+            metadata={
+                "plan_type": "complit_word_sense_lookup",
+                "uses_service": True,
+                "lemma": intent.lemma
+            }
+        )
+
     def _plan_dialect_pattern_search(self, intent: Intent) -> ExecutionPlan:
         """
         Plan for dialect pattern searches.
@@ -713,15 +797,18 @@ class PatternOrchestrator:
         step_num = 1
         
         # Determine which dialect
+        # Link to Italian only if requested
+        link_to_italian = intent.include_italian_written_rep
+
         if ResourceType.SICILIAN in intent.required_resources:
             tool_name = "sicilian_pattern_search"
             params = {
                 "pattern": intent.written_form_pattern,
-                "link_to_italian": True
+                "link_to_italian": link_to_italian
             }
             if intent.pos:
                 params["pos"] = intent.pos
-            
+
             steps.append(PatternStep(
                 tool_name=tool_name,
                 parameters=params,
@@ -729,43 +816,29 @@ class PatternOrchestrator:
                 description=f"Search Sicilian lemmas matching pattern '{intent.written_form_pattern}'",
             ))
             step_num += 1
-        
+
         elif ResourceType.PARMIGIANO in intent.required_resources:
-            # NEW: Handle Parmigiano pattern search
-            # We need to create a custom pattern for this
-            # For now, we'll use a workaround with Italian query + reverse linking
-            # TODO: Create dedicated ParmigianoPatternSearchPattern tool
-            
-            # Step 1: Query LiITA for Italian lemmas
-            # Step 2: Link to Parmigiano
-            # Step 3: Filter Parmigiano by pattern
-            
-            # This is a workaround - ideally we'd have a direct Parmigiano pattern tool
+            # Use the dedicated Parmigiano pattern search tool
+            params = {
+                "pattern": intent.written_form_pattern,
+                "link_to_italian": link_to_italian
+            }
+            if intent.pos:
+                params["pos"] = intent.pos
+
             steps.append(PatternStep(
-                tool_name="liita_basic_query",
-                parameters={},  # No filters - we'll get all lemmas
+                tool_name="parmigiano_pattern_search",
+                parameters=params,
                 step_number=step_num,
-                description="Query LiITA for Italian lemmas",
+                description=f"Search Parmigiano lemmas matching pattern '{intent.written_form_pattern}'",
             ))
             step_num += 1
-            
-            steps.append(PatternStep(
-                tool_name="parmigiano_translation",
-                parameters={"italian_lemma_var": "?lemma"},
-                step_number=step_num,
-                description=f"Link to Parmigiano and filter by pattern '{intent.written_form_pattern}'",
-                depends_on=[1]
-            ))
-            step_num += 1
-            
-            # Note: The pattern filtering would need to happen in the SPARQL
-            # This is a limitation - we need a dedicated Parmigiano search tool
         
         # Aggregation
         if intent.aggregation:
             steps.append(PatternStep(
                 tool_name="aggregation",
-                parameters=intent.aggregation,
+                parameters=self._transform_aggregation_params(intent.aggregation),
                 step_number=step_num,
                 description=f"Apply {intent.aggregation['type']} aggregation",
                 depends_on=[i for i in range(1, step_num)]
@@ -775,53 +848,8 @@ class PatternOrchestrator:
             steps=steps,
             intent=intent,
             metadata={"plan_type": "dialect_pattern_search"}
-        )
+        )    
     
-    def _plan_parmigiano_pattern_search(self, intent: Intent) -> ExecutionPlan:
-        """
-        NEW: Plan for Parmigiano-specific pattern searches.
-        
-        Example: "Find Parmigiano words ending in 'u'"
-        
-        Now uses the dedicated ParmigianoPatternSearchPattern tool.
-        """
-        steps = []
-        step_num = 1
-        
-        # Use the new dedicated pattern search tool
-        params = {
-            "pattern": intent.written_form_pattern,
-            "link_to_italian": True
-        }
-        if intent.pos:
-            params["pos"] = intent.pos
-        
-        steps.append(PatternStep(
-            tool_name="parmigiano_pattern_search",
-            parameters=params,
-            step_number=step_num,
-            description=f"Search Parmigiano lemmas matching pattern '{intent.written_form_pattern}'",
-        ))
-        step_num += 1
-        
-        # Aggregation if needed
-        if intent.aggregation:
-            steps.append(PatternStep(
-                tool_name="aggregation",
-                parameters=intent.aggregation,
-                step_number=step_num,
-                description=f"Apply {intent.aggregation['type']} aggregation",
-                depends_on=[1]
-            ))
-        
-        return ExecutionPlan(
-            steps=steps,
-            intent=intent,
-            metadata={
-                "plan_type": "parmigiano_pattern_search",
-                "pattern": intent.written_form_pattern
-            }
-        )
     
     def _plan_dialect_translation(self, intent: Intent) -> ExecutionPlan:
         """
@@ -895,7 +923,7 @@ class PatternOrchestrator:
         if intent.aggregation:
             steps.append(PatternStep(
                 tool_name="aggregation",
-                parameters=intent.aggregation,
+                parameters=self._transform_aggregation_params(intent.aggregation),
                 step_number=step_num,
                 description=f"Apply {intent.aggregation['type']} aggregation",
                 depends_on=[i for i in range(1, step_num)]
@@ -983,7 +1011,7 @@ class PatternOrchestrator:
         if intent.aggregation:
             steps.append(PatternStep(
                 tool_name="aggregation",
-                parameters=intent.aggregation,
+                parameters=self._transform_aggregation_params(intent.aggregation),
                 step_number=step_num,
                 description=f"Apply {intent.aggregation['type']} aggregation",
                 depends_on=[i for i in range(1, step_num)]
@@ -1059,7 +1087,7 @@ class PatternOrchestrator:
         if intent.aggregation:
             steps.append(PatternStep(
                 tool_name="aggregation",
-                parameters=intent.aggregation,
+                parameters=self._transform_aggregation_params(intent.aggregation),
                 step_number=step_num,
                 description=f"Apply {intent.aggregation['type']} aggregation",
                 depends_on=[i for i in range(1, step_num)]
@@ -1097,7 +1125,7 @@ class PatternOrchestrator:
         if intent.aggregation:
             steps.append(PatternStep(
                 tool_name="aggregation",
-                parameters=intent.aggregation,
+                parameters=self._transform_aggregation_params(intent.aggregation),
                 step_number=step_num,
                 description=f"Apply {intent.aggregation['type']} aggregation",
                 depends_on=[i for i in range(1, step_num)]
