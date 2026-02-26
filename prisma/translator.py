@@ -26,6 +26,7 @@ from .orchestrator import (
 )
 from .assembler import PatternAssembler, AssemblyResult
 from .intent_analyzer import IntentAnalyzer
+from .filter_language import FilterValidator, FilterTranslator, translate_llm_filters
 
 
 # ============================================================================
@@ -37,16 +38,28 @@ class IntentConverter:
     Converts intent dictionaries (from LLM) into Intent objects (for orchestrator).
 
     This handles the translation between the LLM's JSON output and the
-    type-safe Intent dataclass.
+    type-safe Intent dataclass. Also validates and processes the filters array.
     """
 
-    @staticmethod
-    def dict_to_intent(intent_dict: Dict) -> Intent:
+    def __init__(self):
+        """Initialize with filter validator."""
+        self.filter_validator = FilterValidator()
+
+    def dict_to_intent(self, intent_dict: Dict) -> Tuple[Intent, List[str]]:
         """
         Convert intent dictionary from LLM into Intent object.
 
-        Handles type conversions, enum parsing, and default values.
+        Handles type conversions, enum parsing, default values,
+        and filter validation/processing.
+
+        Args:
+            intent_dict: Dictionary from LLM analysis
+
+        Returns:
+            Tuple of (Intent object, list of filter warnings)
         """
+        filter_warnings = []
+
         # Parse query type
         query_type_str = intent_dict.get('query_type', 'basic_lemma_lookup')
         try:
@@ -88,17 +101,33 @@ class IntentConverter:
             except ValueError:
                 pass
 
+        # Process filters (v2)
+        raw_filters = intent_dict.get('filters', [])
+
+        # Extract legacy fields from raw filters (SimplifiedFilter format) for backwards compatibility
+        # This must be done BEFORE translation to FilterSpec format
+        pos, gender, inflection_type, definition_pattern, pattern_type, written_form_pattern = \
+            self._extract_legacy_fields(raw_filters, intent_dict)
+
+        # Validate and translate filters to FilterSpec format for pattern tools
+        filter_spec_dicts, filter_warnings = self._process_filters(
+            raw_filters, resources, intent_dict
+        )
+
         # Create Intent object
-        return Intent(
+        intent = Intent(
             query_type=query_type,
             required_resources=resources,
             lemma=intent_dict.get('lemma'),
-            pos=intent_dict.get('pos'),
-            definition_pattern=intent_dict.get('definition_pattern'),
-            pattern_type=intent_dict.get('pattern_type'),
-            written_form_pattern=intent_dict.get('written_form_pattern'),
+            lemma_b=intent_dict.get('lemma_b'),  # For relation checking queries
+            pos=pos,
+            gender=gender,
+            inflection_type=inflection_type,
+            definition_pattern=definition_pattern,
+            pattern_type=pattern_type,
+            written_form_pattern=written_form_pattern,
             semantic_relation=semantic_relation,
-            filters=intent_dict.get('filters', []),
+            filters=filter_spec_dicts,  # Now in FilterSpec format for pattern tools
             aggregation=intent_dict.get('aggregation'),
             retrieve_definitions=intent_dict.get('retrieve_definitions', True),
             retrieve_examples=intent_dict.get('retrieve_examples', False),
@@ -106,6 +135,131 @@ class IntentConverter:
             complexity_score=intent_dict.get('complexity_score', 1),
             user_query=intent_dict.get('user_query', '')
         )
+
+        return intent, filter_warnings
+
+    def _process_filters(
+        self,
+        raw_filters: List[Dict],
+        resources: List[ResourceType],
+        intent_dict: Dict
+    ) -> Tuple[List[Dict], List[str]]:
+        """
+        Validate, translate, and process the filters array.
+
+        Converts SimplifiedFilter format (from LLM) to FilterSpec format
+        (expected by pattern tools).
+
+        Args:
+            raw_filters: Raw filter dictionaries from LLM (SimplifiedFilter format)
+            resources: Required resources for this query
+            intent_dict: Full intent dictionary
+
+        Returns:
+            Tuple of (FilterSpec dicts for pattern tools, warnings)
+        """
+        if not raw_filters:
+            return [], []
+
+        # Determine resource type for validation
+        # Use the primary resource (first one, or liita by default)
+        # Map resource enum values to PropertyRegistry names
+        resource_type = "liita"
+        resource_type_mapping = {
+            "liita_lemma_bank": "liita",
+            "complit": "complit",
+            "parmigiano": "parmigiano",
+            "sicilian": "sicilian",
+            "sentix": "sentix",
+            "elita": "elita",
+        }
+        if resources:
+            primary_resource = resources[0]
+            resource_type = resource_type_mapping.get(primary_resource.value, "liita")
+
+        # Use the convenience function to validate and translate
+        filter_specs, warnings = translate_llm_filters(raw_filters, resource_type)
+
+        # Convert FilterSpecs to dicts for passing to pattern tools
+        filter_spec_dicts = []
+        for spec in filter_specs:
+            spec_dict = {
+                "target_variable": spec.target_variable,
+                "filter_type": spec.filter_type.value,
+            }
+            if spec.property_path:
+                spec_dict["property_path"] = spec.property_path
+            if spec.value:
+                spec_dict["value"] = spec.value
+            if spec.value_variable:
+                spec_dict["value_variable"] = spec.value_variable
+            if spec.negate:
+                spec_dict["negate"] = spec.negate
+            if spec.optional:
+                spec_dict["optional"] = spec.optional
+            filter_spec_dicts.append(spec_dict)
+
+        return filter_spec_dicts, warnings
+
+    def _extract_legacy_fields(
+        self,
+        filters: List[Dict],
+        intent_dict: Dict
+    ) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str], Optional[str], Optional[str]]:
+        """
+        Extract legacy fields (pos, gender, etc.) from filters for backwards compatibility.
+
+        This ensures that pattern tools that still use individual parameters
+        continue to work even when the LLM uses the new filters format.
+
+        Args:
+            filters: Validated filter dictionaries
+            intent_dict: Original intent dictionary
+
+        Returns:
+            Tuple of (pos, gender, inflection_type, definition_pattern, pattern_type, written_form_pattern)
+        """
+        # Start with values from intent_dict (legacy fields)
+        pos = intent_dict.get('pos')
+        gender = intent_dict.get('gender')
+        inflection_type = intent_dict.get('inflection_type')
+        definition_pattern = intent_dict.get('definition_pattern')
+        pattern_type = intent_dict.get('pattern_type')
+        written_form_pattern = intent_dict.get('written_form_pattern')
+
+        # Override with values from filters if present
+        for f in filters:
+            prop = f.get('property', '').lower()
+
+            if prop == 'pos' and f.get('value'):
+                pos = pos or f['value']
+            elif prop == 'gender' and f.get('value'):
+                gender = gender or f['value']
+            elif prop == 'inflection_type' and f.get('value'):
+                inflection_type = inflection_type or f['value']
+
+            # Handle pattern filters
+            if f.get('pattern'):
+                target = f.get('target', 'written_rep')
+                if target == 'definition':
+                    definition_pattern = definition_pattern or f['pattern']
+                    pattern_type = pattern_type or f.get('pattern_type', 'regex')
+                else:
+                    written_form_pattern = written_form_pattern or f['pattern']
+                    pattern_type = pattern_type or f.get('pattern_type', 'regex')
+
+        return pos, gender, inflection_type, definition_pattern, pattern_type, written_form_pattern
+
+    # Keep static method for backwards compatibility
+    @staticmethod
+    def dict_to_intent_legacy(intent_dict: Dict) -> Intent:
+        """
+        Legacy static method for backwards compatibility.
+        Does not validate filters.
+        """
+        converter = IntentConverter()
+        intent, _ = converter.dict_to_intent(intent_dict)
+        return intent
 
 
 # ============================================================================
@@ -191,7 +345,8 @@ class Translator:
     3. Pattern Assembly (Composition)
 
     Usage:
-        from prisma import Translator, create_llm_client
+        from prisma_v2 import Translator
+        from shared import create_llm_client
 
         client = create_llm_client(provider="mistral", api_key="...")
         translator = Translator(client)
@@ -260,8 +415,13 @@ class Translator:
             if intent_warnings:
                 self._log(f"  [WARN] Warnings: {len(intent_warnings)}")
 
-            # Convert to Intent object
-            intent = self.converter.dict_to_intent(intent_dict)
+            # Convert to Intent object (with filter validation)
+            intent, filter_warnings = self.converter.dict_to_intent(intent_dict)
+
+            # Merge filter warnings into intent warnings
+            intent_warnings.extend(filter_warnings)
+            if filter_warnings:
+                self._log(f"  [WARN] Filter warnings: {len(filter_warnings)}")
 
             # Step 2: Pattern Orchestration (Rules)
             self._log("\n[2/3] Creating execution plan...")

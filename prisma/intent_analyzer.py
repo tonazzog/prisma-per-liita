@@ -35,7 +35,7 @@ Your ONLY task is to analyze natural language queries about Italian linguistics 
 # AVAILABLE RESOURCES
 
 1. **LiITA Lemma Bank** (Local)
-   - Italian lemmas with part-of-speech tags
+   - Italian lemmas with part-of-speech, gender, inflection type tags
    - Written representations
    - Basic filtering capabilities
 
@@ -127,6 +127,74 @@ When identifying semantic relations, use these exact values:
 - **holonym**: X contains Y as part (e.g., "car" is a holonym of "wheel")
 - **synonym**: X has similar meaning to Y
 
+# FILTER SPECIFICATION
+
+Use the `filters` array for flexible filtering. Each filter is an object with these fields:
+
+## Property Filters
+Filter by a property value (POS, gender, polarity, etc.):
+```json
+{"property": "pos", "value": "noun"}
+{"property": "gender", "value": "masculine"}
+{"property": "polarity", "value": "Positive"}
+{"property": "emotion", "value": "Gioia"}
+```
+
+Available properties by resource:
+- **LiITA**: pos (noun|verb|adjective|adverb|pronoun|preposition|conjunction|interjection|article|numeral|participle), gender (masculine|feminine|neuter|common), inflection_type
+- **Sentix**: polarity (Positive|Negative|Neutral), polarity_value (numeric -1 to +1)
+- **ELIta**: emotion (Gioia|Tristezza|Rabbia|Paura|Disgusto|Sorpresa)
+
+## Pattern Filters
+Filter by text pattern on written representation or definition:
+```json
+{"pattern": "a$", "pattern_type": "ends_with"}
+{"pattern": "^casa", "pattern_type": "starts_with"}
+{"pattern": "colore", "pattern_type": "contains"}
+{"pattern": "^[aeiou].*o$", "pattern_type": "regex"}
+```
+
+Pattern types: regex | starts_with | ends_with | contains
+Optional: `"target": "written_rep"` or `"target": "definition"` (default: written_rep)
+
+## Range Filters
+Filter by numeric range (for polarity_value):
+```json
+{"property": "polarity_value", "min_value": 0.5}
+{"property": "polarity_value", "max_value": -0.5}
+{"property": "polarity_value", "min_value": 0.3, "max_value": 0.8}
+```
+
+## Modifiers
+Add these optional fields to any filter:
+- `"negate": true` - Invert the filter (NOT)
+- `"retrieve": true` - Include the value in output (for variable retrieval)
+
+## Examples
+Query: "Find masculine nouns ending with 'a'"
+```json
+"filters": [
+  {"property": "pos", "value": "noun"},
+  {"property": "gender", "value": "masculine"},
+  {"pattern": "a$", "pattern_type": "ends_with"}
+]
+```
+
+Query: "Find positive words with polarity > 0.5"
+```json
+"filters": [
+  {"property": "polarity", "value": "Positive"},
+  {"property": "polarity_value", "min_value": 0.5}
+]
+```
+
+Query: "Find words that are NOT verbs"
+```json
+"filters": [
+  {"property": "pos", "value": "verb", "negate": true}
+]
+```
+
 # OUTPUT FORMAT
 
 You must output valid JSON with this exact structure:
@@ -137,12 +205,12 @@ You must output valid JSON with this exact structure:
   "required_resources": ["array of: liita_lemma_bank | complit | parmigiano | sicilian | sentix | elita"],
   "lemma": "specific lemma mentioned (or null)",
   "lemma_b": "second lemma for relation checking queries (or null)",
-  "pos": "part of speech: noun | verb | adjective | adverb (or null)",
-  "definition_pattern": "text pattern to match in definitions (or null)",
-  "pattern_type": "starts_with | contains | ends_with | regex (or null)",
-  "written_form_pattern": "regex pattern for written forms (or null)",
   "semantic_relation": "hyponym | hypernym | meronym | holonym | synonym | antonym (or null)",
-  "filters": [],
+  "filters": [
+    {"property": "pos", "value": "noun"},
+    {"property": "gender", "value": "masculine"},
+    {"pattern": "a$", "pattern_type": "ends_with"}
+  ],
   "aggregation": {
     "type": "count | group_concat | distinct (or null)",
     "aggregate_var": "variable to aggregate",
@@ -162,13 +230,31 @@ You must output valid JSON with this exact structure:
 }
 ```
 
+## IMPORTANT: Use `filters` array for ALL filtering
+
+The `filters` array is the PRIMARY way to specify constraints. Use it for:
+- Part of speech: `{"property": "pos", "value": "noun"}`
+- Gender: `{"property": "gender", "value": "masculine"}`
+- Written form patterns: `{"pattern": "a$", "pattern_type": "ends_with"}`
+- Definition patterns: `{"pattern": "colore", "pattern_type": "contains", "target": "definition"}`
+- Polarity: `{"property": "polarity", "value": "Positive"}`
+- Polarity range: `{"property": "polarity_value", "min_value": 0.5}`
+- Emotion: `{"property": "emotion", "value": "Gioia"}`
+
+Legacy fields (pos, gender, definition_pattern, pattern_type, written_form_pattern) are still supported for backwards compatibility but prefer using `filters`.
+
 # CRITICAL RULES
 
 1. **Always output valid JSON** - no markdown, no explanations outside JSON
 2. **Use exact enum values** - no variations or synonyms
 3. **Aggregation only when EXPLICITLY requested** - Set aggregation to null unless the user explicitly asks for:
-   - "count" / "how many" → use count aggregation
-   - "group" / "grouped" → use group_concat aggregation
+   - "count" / "how many" / "count by X" / "count per X" → use **count** aggregation (add group_by_vars if grouping is needed)
+   - "average" / "mean" / "avg" → use **avg** aggregation (requires aggregate_var for the numeric variable)
+   - "sum" / "total" → use **sum** aggregation (requires aggregate_var)
+   - "minimum" / "min" / "maximum" / "max" → use **min** or **max** aggregation
+   - NOTE: aggregate_var must be the SPARQL variable name (camelCase like "polarityValue"), NOT the filter property name (snake_case like "polarity_value")
+   - "concatenate" / "list together" / "combine into one string" → use group_concat aggregation
+   - IMPORTANT: "Count by X" or "Count per X" means COUNT with GROUP BY, NOT group_concat!
    - DO NOT add aggregation just for "readability" or to be "helpful"
    - Simple listing queries (e.g., "Find hyponyms of X") do NOT need aggregation
 4. **Be conservative with complexity_score** - prefer lower scores
@@ -185,17 +271,56 @@ See the examples section below for correct classifications."""
 
 INTENT_EXAMPLES = [
     {
+        "query": "Find all masculine nouns ending with 'a'",
+        "intent": {
+            "query_type": "basic_lemma_lookup",
+            "required_resources": ["liita_lemma_bank"],
+            "lemma": None,
+            "semantic_relation": None,
+            "filters": [
+                {"property": "pos", "value": "noun"},
+                {"property": "gender", "value": "masculine"},
+                {"pattern": "a$", "pattern_type": "ends_with"}
+            ],
+            "aggregation": None,
+            "retrieve_definitions": False,
+            "retrieve_examples": False,
+            "include_italian_written_rep": True,
+            "complexity_score": 2,
+            "user_query": "Find all masculine nouns ending with 'a'",
+            "reasoning": "LiITA lemma search with POS, gender, and written form pattern filters"
+        }
+    },
+    {
+        "query": "List feminine adjectives",
+        "intent": {
+            "query_type": "basic_lemma_lookup",
+            "required_resources": ["liita_lemma_bank"],
+            "lemma": None,
+            "semantic_relation": None,
+            "filters": [
+                {"property": "pos", "value": "adjective"},
+                {"property": "gender", "value": "feminine"}
+            ],
+            "aggregation": None,
+            "retrieve_definitions": False,
+            "retrieve_examples": False,
+            "include_italian_written_rep": True,
+            "complexity_score": 2,
+            "user_query": "List feminine adjectives",
+            "reasoning": "LiITA lemma search with POS and gender filters - no aggregation, just list"
+        }
+    },
+    {
         "query": "How many nouns are in LiITA?",
         "intent": {
             "query_type": "basic_lemma_lookup",
             "required_resources": ["liita_lemma_bank"],
             "lemma": None,
-            "pos": "noun",
-            "definition_pattern": None,
-            "pattern_type": None,
-            "written_form_pattern": None,
             "semantic_relation": None,
-            "filters": [],
+            "filters": [
+                {"property": "pos", "value": "noun"}
+            ],
             "aggregation": {
                 "type": "count",
                 "aggregate_var": None,
@@ -217,12 +342,11 @@ INTENT_EXAMPLES = [
             "query_type": "dialect_pattern_search",
             "required_resources": ["parmigiano"],
             "lemma": None,
-            "pos": "noun",
-            "definition_pattern": None,
-            "pattern_type": None,
-            "written_form_pattern": ".*",
             "semantic_relation": None,
-            "filters": [],
+            "filters": [
+                {"property": "pos", "value": "noun"},
+                {"pattern": ".*", "pattern_type": "regex"}
+            ],
             "aggregation": {
                 "type": "count",
                 "aggregate_var": None,
@@ -244,12 +368,11 @@ INTENT_EXAMPLES = [
             "query_type": "dialect_pattern_search",
             "required_resources": ["sicilian"],
             "lemma": None,
-            "pos": "verb",
-            "definition_pattern": None,
-            "pattern_type": None,
-            "written_form_pattern": ".*",
             "semantic_relation": None,
-            "filters": [],
+            "filters": [
+                {"property": "pos", "value": "verb"},
+                {"pattern": ".*", "pattern_type": "regex"}
+            ],
             "aggregation": {
                 "type": "count",
                 "aggregate_var": None,
@@ -308,6 +431,96 @@ INTENT_EXAMPLES = [
         }
     },
     {
+        "query": "Find words associated with joy",
+        "intent": {
+            "query_type": "elita_emotion",
+            "required_resources": ["liita_lemma_bank", "elita"],
+            "lemma": None,
+            "semantic_relation": None,
+            "filters": [
+                {"property": "emotion", "value": "Gioia"}
+            ],
+            "aggregation": None,
+            "retrieve_definitions": False,
+            "retrieve_examples": False,
+            "include_italian_written_rep": True,
+            "complexity_score": 2,
+            "user_query": "Find words associated with joy",
+            "reasoning": "Search for lemmas with specific emotion (Gioia/Joy) using ELIta. English 'joy' maps to Italian 'Gioia'"
+        }
+    },
+    {
+        "query": "Count words by emotion",
+        "intent": {
+            "query_type": "elita_emotion",
+            "required_resources": ["liita_lemma_bank", "elita"],
+            "lemma": None,
+            "semantic_relation": None,
+            "filters": [],
+            "aggregation": {
+                "type": "count",
+                "aggregate_var": None,
+                "group_by_vars": ["emotionLabel"],
+                "separator": None,
+                "order_by": {"var": "count", "direction": "DESC"}
+            },
+            "retrieve_definitions": False,
+            "retrieve_examples": False,
+            "include_italian_written_rep": False,
+            "complexity_score": 2,
+            "user_query": "Count words by emotion",
+            "reasoning": "Count aggregation grouped by emotion label. Use 'count' type with group_by_vars, NOT group_concat."
+        }
+    },
+    {
+        "query": "Count words by polarity",
+        "intent": {
+            "query_type": "sentix_polarity",
+            "required_resources": ["liita_lemma_bank", "sentix"],
+            "lemma": None,
+            "semantic_relation": None,
+            "filters": [],
+            "aggregation": {
+                "type": "count",
+                "aggregate_var": None,
+                "group_by_vars": ["polarityLabel"],
+                "separator": None,
+                "order_by": {"var": "count", "direction": "DESC"}
+            },
+            "retrieve_definitions": False,
+            "retrieve_examples": False,
+            "include_italian_written_rep": False,
+            "complexity_score": 2,
+            "user_query": "Count words by polarity",
+            "reasoning": "Count aggregation grouped by polarity label. Use 'count' type with group_by_vars, NOT group_concat."
+        }
+    },
+    {
+        "query": "Get average polarity of words ending with 'zione'",
+        "intent": {
+            "query_type": "sentix_polarity",
+            "required_resources": ["liita_lemma_bank", "sentix"],
+            "lemma": None,
+            "semantic_relation": None,
+            "filters": [
+                {"pattern": "zione$", "pattern_type": "ends_with"}
+            ],
+            "aggregation": {
+                "type": "avg",
+                "aggregate_var": "polarityValue",
+                "group_by_vars": [],
+                "separator": None,
+                "order_by": None
+            },
+            "retrieve_definitions": False,
+            "retrieve_examples": False,
+            "include_italian_written_rep": False,
+            "complexity_score": 3,
+            "user_query": "Get average polarity of words ending with 'zione'",
+            "reasoning": "Average aggregation on polarityValue. Use 'avg' type with aggregate_var set to the SPARQL variable name (polarityValue, NOT polarity_value)."
+        }
+    },
+    {
         "query": "Are 'cane' and 'animale' related?",
         "intent": {
             "query_type": "complit_relation_check",
@@ -357,12 +570,10 @@ INTENT_EXAMPLES = [
             "query_type": "complit_definitions",
             "required_resources": ["complit"],
             "lemma": None,
-            "pos": None,
-            "definition_pattern": "uccello",
-            "pattern_type": "starts_with",
-            "written_form_pattern": None,
             "semantic_relation": None,
-            "filters": [],
+            "filters": [
+                {"pattern": "uccello", "pattern_type": "starts_with", "target": "definition"}
+            ],
             "aggregation": None,
             "retrieve_definitions": True,
             "retrieve_examples": False,
@@ -531,12 +742,11 @@ INTENT_EXAMPLES = [
             "query_type": "dialect_pattern_search",
             "required_resources": ["sicilian", "liita_lemma_bank"],
             "lemma": None,
-            "pos": "noun",
-            "definition_pattern": None,
-            "pattern_type": None,
-            "written_form_pattern": "ìa$",
             "semantic_relation": None,
-            "filters": [],
+            "filters": [
+                {"property": "pos", "value": "noun"},
+                {"pattern": "ìa$", "pattern_type": "ends_with"}
+            ],
             "aggregation": None,
             "retrieve_definitions": False,
             "retrieve_examples": False,
@@ -552,12 +762,11 @@ INTENT_EXAMPLES = [
             "query_type": "dialect_pattern_search",
             "required_resources": ["parmigiano", "liita_lemma_bank"],
             "lemma": None,
-            "pos": "noun",
-            "definition_pattern": None,
-            "pattern_type": None,
-            "written_form_pattern": "u$",
             "semantic_relation": None,
-            "filters": [],
+            "filters": [
+                {"property": "pos", "value": "noun"},
+                {"pattern": "u$", "pattern_type": "ends_with"}
+            ],
             "aggregation": None,
             "retrieve_definitions": False,
             "retrieve_examples": False,
@@ -573,12 +782,10 @@ INTENT_EXAMPLES = [
             "query_type": "basic_lemma_lookup",
             "required_resources": ["liita_lemma_bank"],
             "lemma": None,
-            "pos": None,
-            "definition_pattern": None,
-            "pattern_type": None,
-            "written_form_pattern": "^infra",
             "semantic_relation": None,
-            "filters": [],
+            "filters": [
+                {"pattern": "^infra", "pattern_type": "starts_with"}
+            ],
             "aggregation": None,
             "retrieve_definitions": False,
             "retrieve_examples": False,
@@ -615,12 +822,11 @@ INTENT_EXAMPLES = [
             "query_type": "complit_definitions",
             "required_resources": ["complit"],
             "lemma": None,
-            "pos": "noun",
-            "definition_pattern": "colore",
-            "pattern_type": "contains",
-            "written_form_pattern": None,
             "semantic_relation": None,
-            "filters": [],
+            "filters": [
+                {"property": "pos", "value": "noun"},
+                {"pattern": "colore", "pattern_type": "contains", "target": "definition"}
+            ],
             "aggregation": None,
             "retrieve_definitions": True,
             "retrieve_examples": False,
@@ -636,12 +842,10 @@ INTENT_EXAMPLES = [
             "query_type": "basic_lemma_lookup",
             "required_resources": ["liita_lemma_bank"],
             "lemma": None,
-            "pos": "verb",
-            "definition_pattern": None,
-            "pattern_type": None,
-            "written_form_pattern": None,
             "semantic_relation": None,
-            "filters": [],
+            "filters": [
+                {"property": "pos", "value": "verb"}
+            ],
             "aggregation": {
                 "type": "count",
                 "aggregate_var": None,
@@ -700,27 +904,6 @@ INTENT_EXAMPLES = [
         }
     },
     {
-        "query": "Find words associated with joy",
-        "intent": {
-            "query_type": "elita_emotion",
-            "required_resources": ["liita_lemma_bank", "elita"],
-            "lemma": None,
-            "pos": None,
-            "definition_pattern": None,
-            "pattern_type": None,
-            "written_form_pattern": None,
-            "semantic_relation": None,
-            "filters": [{"type": "emotion", "value": "Gioia"}],
-            "aggregation": None,
-            "retrieve_definitions": False,
-            "retrieve_examples": False,
-            "include_italian_written_rep": True,
-            "complexity_score": 2,
-            "user_query": "Find words associated with joy",
-            "reasoning": "Search for lemmas with specific emotion (Gioia/Joy) using ELIta"
-        }
-    },
-    {
         "query": "What is the polarity and emotion of 'amore'?",
         "intent": {
             "query_type": "affective_multi_resource",
@@ -747,12 +930,10 @@ INTENT_EXAMPLES = [
             "query_type": "affective_multi_resource",
             "required_resources": ["liita_lemma_bank", "sentix", "complit"],
             "lemma": None,
-            "pos": None,
-            "definition_pattern": None,
-            "pattern_type": None,
-            "written_form_pattern": None,
             "semantic_relation": None,
-            "filters": [{"type": "polarity", "value": "Positive"}],
+            "filters": [
+                {"property": "polarity", "value": "Positive"}
+            ],
             "aggregation": None,
             "retrieve_definitions": True,
             "retrieve_examples": False,
@@ -760,6 +941,45 @@ INTENT_EXAMPLES = [
             "complexity_score": 4,
             "user_query": "Find positive words with their definitions",
             "reasoning": "Multi-resource query combining Sentix polarity filter with CompL-it definitions"
+        }
+    },
+    {
+        "query": "Find strongly positive words (polarity > 0.7)",
+        "intent": {
+            "query_type": "sentix_polarity",
+            "required_resources": ["liita_lemma_bank", "sentix"],
+            "lemma": None,
+            "semantic_relation": None,
+            "filters": [
+                {"property": "polarity", "value": "Positive"},
+                {"property": "polarity_value", "min_value": 0.7}
+            ],
+            "aggregation": None,
+            "retrieve_definitions": False,
+            "retrieve_examples": False,
+            "include_italian_written_rep": True,
+            "complexity_score": 2,
+            "user_query": "Find strongly positive words (polarity > 0.7)",
+            "reasoning": "Sentix query with both polarity type and value range filter"
+        }
+    },
+    {
+        "query": "Find verbs that are NOT nouns",
+        "intent": {
+            "query_type": "basic_lemma_lookup",
+            "required_resources": ["liita_lemma_bank"],
+            "lemma": None,
+            "semantic_relation": None,
+            "filters": [
+                {"property": "pos", "value": "verb"}
+            ],
+            "aggregation": None,
+            "retrieve_definitions": False,
+            "retrieve_examples": False,
+            "include_italian_written_rep": True,
+            "complexity_score": 1,
+            "user_query": "Find verbs that are NOT nouns",
+            "reasoning": "Simple POS filter - verbs are already not nouns by definition"
         }
     }
 ]
@@ -778,7 +998,7 @@ class IntentAnalyzer:
 
     Example usage with the multi-provider LLM module:
 
-        from llm import create_llm_client
+        from shared import create_llm_client
 
         # Create an LLM client (supports: mistral, anthropic, openai, gemini, ollama)
         client = create_llm_client(
@@ -807,7 +1027,7 @@ class IntentAnalyzer:
         self.system_prompt = INTENT_ANALYZER_SYSTEM_PROMPT
         self.examples = INTENT_EXAMPLES
     
-    def analyze(self, user_query: str, include_examples: int = 5) -> Tuple[Dict, List[str]]:
+    def analyze(self, user_query: str, include_examples: int = 12) -> Tuple[Dict, List[str]]:
         """
         Analyze a user query and produce an Intent object.
         
@@ -968,7 +1188,12 @@ class IntentAnalyzer:
         valid_pos = ['noun', 'verb', 'adjective', 'adverb']
         if intent_dict.get('pos') and intent_dict['pos'] not in valid_pos:
             warnings.append(f"Invalid pos: {intent_dict['pos']}")
-        
+
+        # Validate gender if present (v2)
+        valid_gender = ['masculine', 'feminine', 'neuter', 'common']
+        if intent_dict.get('gender') and intent_dict['gender'] not in valid_gender:
+            warnings.append(f"Invalid gender: {intent_dict['gender']}")
+
         # Check consistency: semantic queries need lemma
         if intent_dict.get('query_type') == 'complit_semantic':
             if not intent_dict.get('lemma'):

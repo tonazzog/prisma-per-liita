@@ -9,14 +9,32 @@ Unified interface for multiple LLM providers:
 - Google (Gemini)
 - Ollama (local models)
 
-Usage:
-    from prisma import create_llm_client
+This is a shared module used by both prisma (stable) and prisma_v2 (experimental).
 
-    # Create a client for your preferred provider
+Default models (cost-effective, balancing performance and price):
+    Anthropic : claude-haiku-4-5-20251001  (fast and affordable)
+    OpenAI    : gpt-4.1-mini               (affordable, large context, strong instruction following)
+    Gemini    : gemini-2.0-flash           (very fast, very cheap)
+    Mistral   : mistral-small-latest       (efficient and affordable)
+    Ollama    : llama3.2                   (local, no cost)
+
+Other available models (override with the model= parameter):
+    Anthropic : claude-sonnet-4-6, claude-opus-4-6
+    OpenAI    : gpt-4.1, gpt-4.1-nano, gpt-5, o3, o3-mini, o4-mini
+    Gemini    : gemini-2.0-flash-lite, gemini-2.0-pro, gemini-1.5-pro
+    Mistral   : mistral-medium-latest, mistral-large-latest
+
+Usage:
+    from shared import create_llm_client
+
+    # Use the cost-effective default for each provider
+    client = create_llm_client(provider="anthropic", api_key="your-api-key")
+
+    # Or override the model explicitly
     client = create_llm_client(
         provider="anthropic",
         api_key="your-api-key",
-        model="claude-sonnet-4-20250514"
+        model="claude-sonnet-4-6"
     )
 
     # Use the client
@@ -96,9 +114,13 @@ class BaseLLM(ABC):
 # ============================================================================
 
 class MistralLLM(BaseLLM):
-    """Mistral AI client"""
+    """Mistral AI client
 
-    DEFAULT_MODEL = "mistral-large-latest"
+    Cost-effective default: mistral-small-latest
+    Higher capability: mistral-medium-latest, mistral-large-latest
+    """
+
+    DEFAULT_MODEL = "mistral-small-latest"
 
     def __init__(
         self,
@@ -151,9 +173,14 @@ class MistralLLM(BaseLLM):
 # ============================================================================
 
 class AnthropicLLM(BaseLLM):
-    """Anthropic Claude client"""
+    """Anthropic Claude client
 
-    DEFAULT_MODEL = "claude-sonnet-4-20250514"
+    Cost-effective default: claude-haiku-4-5-20251001
+    Balanced: claude-sonnet-4-6
+    Most capable: claude-opus-4-6
+    """
+
+    DEFAULT_MODEL = "claude-haiku-4-5-20251001"
 
     def __init__(
         self,
@@ -209,9 +236,16 @@ class AnthropicLLM(BaseLLM):
 # ============================================================================
 
 class OpenAILLM(BaseLLM):
-    """OpenAI GPT client"""
+    """OpenAI GPT client
 
-    DEFAULT_MODEL = "gpt-4o"
+    Cost-effective default: gpt-4.1-mini  (affordable, large context, strong instruction following)
+    Lightweight: gpt-4.1-nano
+    Balanced: gpt-4.1
+    Flagship: gpt-5
+    Reasoning (o-series): o3, o3-mini, o4-mini
+    """
+
+    DEFAULT_MODEL = "gpt-4.1-mini"
 
     def __init__(
         self,
@@ -264,9 +298,14 @@ class OpenAILLM(BaseLLM):
 # ============================================================================
 
 class GeminiLLM(BaseLLM):
-    """Google Gemini client"""
+    """Google Gemini client
 
-    DEFAULT_MODEL = "gemini-1.5-pro"
+    Cost-effective default: gemini-2.0-flash
+    Lightweight: gemini-2.0-flash-lite
+    Most capable: gemini-2.0-pro
+    """
+
+    DEFAULT_MODEL = "gemini-2.0-flash"
 
     def __init__(
         self,
@@ -340,7 +379,7 @@ class GeminiLLM(BaseLLM):
 class OllamaLLM(BaseLLM):
     """Ollama local LLM client"""
 
-    DEFAULT_MODEL = "llama3.1"
+    DEFAULT_MODEL = "llama3.2"
     DEFAULT_HOST = "http://localhost:11434"
 
     def __init__(
@@ -431,8 +470,8 @@ def create_llm_client(
     Example:
         client = create_llm_client(
             provider="anthropic",
-            api_key="sk-...",
-            model="claude-sonnet-4-20250514"
+            api_key="sk-ant-...",
+            model="claude-haiku-4-5-20251001"  # cost-effective default
         )
         response = client.complete("Hello!", system="You are a helpful assistant.")
     """

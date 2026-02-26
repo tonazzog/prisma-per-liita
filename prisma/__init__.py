@@ -1,18 +1,19 @@
 """
-PRISMA per LiITA
-================
+PRISMA per LiITA v2 (Experimental)
+==================================
 
 Pattern-based Rules for Intent-driven SPARQL with Multiple-resource Assembly.
-A transparent NL2SPARQL system for the LiITA (Linking Italian) knowledge base.
+Version 2 with flexible filter system and skeleton-based query generation.
 
-Features:
-- LLM-based intent analysis (classification only, not generation)
-- Deterministic pattern orchestration
-- Template-based SPARQL assembly
-- Full pipeline transparency
+This is the experimental version with:
+- Flexible filter specifications (FilterSpec)
+- Skeleton-based pattern generation with slots
+- Dynamic property access from ontology
+- Foundation for LLM-driven refinement
 
 Usage:
-    from prisma import Translator, create_llm_client
+    from prisma_v2 import Translator
+    from shared import create_llm_client
 
     # Create an LLM client
     client = create_llm_client(
@@ -24,16 +25,17 @@ Usage:
     translator = Translator(client)
 
     # Translate natural language to SPARQL
-    result = translator.translate("What is the polarity of 'amore'?")
+    result = translator.translate("Find all masculine nouns ending with 'a'")
     print(result.sparql_query)
 
 Author: PRISMA per LiITA Project
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0-experimental"
 __author__ = "PRISMA per LiITA Project"
 
-from .llm import (
+# Import LLM from shared module
+from shared import (
     BaseLLM,
     MistralLLM,
     AnthropicLLM,
@@ -74,10 +76,24 @@ from .assembler import (
     AssemblyResult,
 )
 
+# v2 Filter System (new in v2)
+from .filter_system import (
+    FilterSpec,
+    FilterType,
+    FilterRenderer,
+    FilterBuilder,
+)
+
+from .property_registry import (
+    PropertyRegistry,
+    PropertyInfo,
+    ValueType,
+)
+
 __all__ = [
     # Version
     "__version__",
-    # LLM
+    # LLM (from shared)
     "BaseLLM",
     "MistralLLM",
     "AnthropicLLM",
@@ -106,4 +122,12 @@ __all__ = [
     # Assembly
     "PatternAssembler",
     "AssemblyResult",
+    # Filter System (v2)
+    "FilterSpec",
+    "FilterType",
+    "FilterRenderer",
+    "FilterBuilder",
+    "PropertyRegistry",
+    "PropertyInfo",
+    "ValueType",
 ]

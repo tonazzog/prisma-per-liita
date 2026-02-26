@@ -11,9 +11,13 @@ with Multiple-resource Assembly for the LiITA knowledge base.
 """
 
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Set
+from typing import List, Dict, Optional, Set, Tuple
 from enum import Enum
 from abc import ABC, abstractmethod
+
+# Import filter system for flexible filtering
+from .filter_system import FilterSpec, FilterType, FilterRenderer, FilterBuilder
+from .property_registry import PropertyRegistry
 
 
 
@@ -32,6 +36,7 @@ class VariableType(Enum):
     WRITTEN_REP = "written_rep"
     DEFINITION = "definition"
     POS = "pos"
+    GENDER = "gender"
 
 
 @dataclass
@@ -141,28 +146,35 @@ class PatternTool(ABC):
 class CompLitDefinitionSearchPattern(PatternTool):
     """
     Generates SERVICE clause for searching CompL-it by definition content.
-    
+
     Use Case: "Find words whose definition starts with X"
-    
+
     Template guarantees:
     - Proper SERVICE clause structure
     - Filters inside SERVICE
     - Correct property paths
     - Output variables properly exposed
+
+    Supports flexible filters (v2) alongside legacy parameters.
     """
-    
+
+    def __init__(self):
+        """Initialize with filter system components"""
+        self._filter_renderer = FilterRenderer()
+        self._filter_builder = FilterBuilder()
+
     @property
     def name(self) -> str:
         return "complit_definition_search"
-    
+
     @property
     def description(self) -> str:
         return "Search CompL-it entries by definition pattern"
-    
+
     def get_input_schema(self) -> Dict:
         return {
             "type": "object",
-            "required": ["definition_pattern"],
+            "required": [],
             "properties": {
                 "definition_pattern": {
                     "type": "string",
@@ -182,32 +194,109 @@ class CompLitDefinitionSearchPattern(PatternTool):
                     "type": "boolean",
                     "default": False,
                     "description": "Whether to retrieve usage examples"
+                },
+                "filters": {
+                    "type": "array",
+                    "description": "Flexible filter specifications (v2)",
+                    "items": {"type": "object"}
                 }
             }
         }
-    
-    def generate(self, **kwargs) -> PatternFragment:
-        definition_pattern = kwargs["definition_pattern"]
+
+    def _build_filters_from_legacy(self, **kwargs) -> List[FilterSpec]:
+        """Build FilterSpecs from legacy parameters"""
+        filters = []
+
+        definition_pattern = kwargs.get("definition_pattern")
         pattern_type = kwargs.get("pattern_type", "starts_with")
-        pos_filter = kwargs.get("pos_filter")
-        retrieve_examples = kwargs.get("retrieve_examples", False)
-        
-        # Build filter based on pattern type
-        filter_map = {
-            "starts_with": f'FILTER(strstarts(str(?definition), "{definition_pattern}"))',
-            "contains": f'FILTER(contains(str(?definition), "{definition_pattern}"))',
-            "ends_with": f'FILTER(strends(str(?definition), "{definition_pattern}"))',
-            "regex": f'FILTER(regex(str(?definition), "{definition_pattern}"))'
+
+        if definition_pattern:
+            filters.append(
+                self._filter_builder.definition_pattern(
+                    "?definition", definition_pattern, pattern_type
+                )
+            )
+
+        return filters
+
+    def _build_filters_from_specs(self, filter_specs: List[Dict]) -> List[FilterSpec]:
+        """Build FilterSpecs from flexible filter dictionaries.
+
+        Remaps generic variables to CompL-it specific variables:
+        - ?wr -> ?lemma (written representation)
+        - ?lemma -> ?word (lemma entry)
+        """
+        filters = []
+        # Variable remapping for CompL-it
+        var_remap = {
+            "?wr": "?lemma",       # Written rep in CompL-it is ?lemma
+            "?lemma": "?word",     # Lemma entry is ?word
         }
-        definition_filter = filter_map[pattern_type]
-        
-        # Build POS filter if specified
+        for spec in filter_specs:
+            # Remap target variable if needed
+            target_var = spec.get("target_variable", "")
+            if target_var in var_remap:
+                spec = spec.copy()
+                spec["target_variable"] = var_remap[target_var]
+            filters.append(self._filter_builder.from_dict(spec))
+        return filters
+
+    def generate(self, **kwargs) -> PatternFragment:
+        # Check for flexible filters (v2) first
+        filter_specs = kwargs.get("filters", [])
+        uses_flexible_filters = False
+
+        # Extract POS from filters (needs special handling for CompL-it)
+        pos_filter = kwargs.get("pos_filter")
+        pattern_filters = []
+
+        if filter_specs:
+            for spec in filter_specs:
+                # Check if this is a POS filter (property_equals with partOfSpeech)
+                if spec.get("filter_type") == "property_equals" and "partOfSpeech" in spec.get("property_path", ""):
+                    # Extract POS value for legacy handling
+                    pos_filter = pos_filter or spec.get("value", "").replace("lexinfo:", "")
+                else:
+                    # Keep pattern filters for flexible rendering
+                    pattern_filters.append(spec)
+
+            if pattern_filters:
+                filters = self._build_filters_from_specs(pattern_filters)
+                uses_flexible_filters = True
+            else:
+                filters = self._build_filters_from_legacy(**kwargs)
+        else:
+            filters = self._build_filters_from_legacy(**kwargs)
+
+        # Render filters (only pattern-based filters, not POS)
+        _, filter_clauses, _ = self._filter_renderer.render(filters)
+
+        # Legacy parameters for backward compatibility
+        definition_pattern = kwargs.get("definition_pattern", "")
+        pattern_type = kwargs.get("pattern_type", "starts_with")
+        retrieve_examples = kwargs.get("retrieve_examples", False)
+
+        # Build definition filter (if not using flexible filters for definition)
+        definition_filter = ""
+        if definition_pattern and not uses_flexible_filters:
+            filter_map = {
+                "starts_with": f'FILTER(strstarts(str(?definition), "{definition_pattern}"))',
+                "contains": f'FILTER(contains(str(?definition), "{definition_pattern}"))',
+                "ends_with": f'FILTER(strends(str(?definition), "{definition_pattern}"))',
+                "regex": f'FILTER(regex(str(?definition), "{definition_pattern}"))'
+            }
+            definition_filter = filter_map.get(pattern_type, filter_map["starts_with"])
+        elif uses_flexible_filters and filter_clauses:
+            # Use rendered filter clauses
+            definition_filter = filter_clauses
+
+        # Build POS filter if specified (legacy or extracted from filters)
         pos_clause = ""
         pos_filter_clause = ""
         if pos_filter:
             pos_clause = "lexinfo:partOfSpeech [ rdfs:label ?pos ] ;"
             pos_filter_clause = f'FILTER(str(?pos) = "{pos_filter}") .'
-        
+
         # Build example retrieval if requested
         example_clause = ""
         if retrieve_examples:
@@ -215,7 +304,7 @@ class CompLitDefinitionSearchPattern(PatternTool):
     OPTIONAL {
       ?sense lexinfo:senseExample ?example
     } ."""
-        
+
         sparql = f"""
   SERVICE <https://klab.ilc.cnr.it/graphdb-compl-it/> {{
     ?word a ontolex:Word ;
@@ -229,10 +318,10 @@ class CompLitDefinitionSearchPattern(PatternTool):
     {definition_filter}
     {pos_filter_clause}
   }}"""
-        
+
         # Define output variables
         output_vars = [
-            Variable("?word", VariableType.WORD, "complit", 
+            Variable("?word", VariableType.WORD, "complit",
                     description="CompL-it word entry"),
             Variable("?lemma", VariableType.LEMMA, "complit",
                     description="Written representation of lemma"),
@@ -241,29 +330,32 @@ class CompLitDefinitionSearchPattern(PatternTool):
             Variable("?definition", VariableType.DEFINITION, "complit",
                     optional=True, description="Definition text")
         ]
-        
+
         if retrieve_examples:
             output_vars.append(
                 Variable("?example", VariableType.WRITTEN_REP, "complit",
                         optional=True, description="Usage example")
             )
-        
-        filters = ["definition_pattern"]
+
+        applied_filters = []
+        if definition_pattern or uses_flexible_filters:
+            applied_filters.append("definition_pattern")
         if pos_filter:
-            filters.append("pos")
-        
+            applied_filters.append("pos")
+
         return PatternFragment(
             pattern_name=self.name,
             sparql=sparql,
             input_vars=[],  # No inputs - this is a starting pattern
             output_vars=output_vars,
             required_prefixes={"ontolex", "lexinfo", "rdfs", "skos"},
-            filters_applied=filters,
+            filters_applied=applied_filters,
             needs_service_clause=True,
             metadata={
                 "query_type": "definition_search",
                 "pattern": definition_pattern,
-                "pattern_type": pattern_type
+                "pattern_type": pattern_type,
+                "uses_flexible_filters": uses_flexible_filters
             }
         )
 
@@ -275,27 +367,34 @@ class CompLitDefinitionSearchPattern(PatternTool):
 class CompLitSemanticRelationPattern(PatternTool):
     """
     Generates SERVICE clause for navigating semantic relations in CompL-it.
-    
+
     Use Cases:
     - "Find hyponyms of X" (X is a hypernym of results)
     - "Find hypernyms of X" (X is a hyponym of results)
     - "Find meronyms of X" (X contains results as parts)
-    
+
     Template guarantees:
     - Correct relation property usage
     - Proper sense navigation
     - Related word retrieval
     - Definition collection
+
+    Supports flexible filters (v2) for additional result filtering.
     """
-    
+
+    def __init__(self):
+        """Initialize with filter system components"""
+        self._filter_renderer = FilterRenderer()
+        self._filter_builder = FilterBuilder()
+
     @property
     def name(self) -> str:
         return "complit_semantic_relation"
-    
+
     @property
     def description(self) -> str:
         return "Navigate semantic relations (hypernymy, meronymy, etc.) in CompL-it"
-    
+
     def get_input_schema(self) -> Dict:
         return {
             "type": "object",
@@ -320,16 +419,37 @@ class CompLitSemanticRelationPattern(PatternTool):
                     "type": "boolean",
                     "default": True,
                     "description": "Retrieve definitions of related words"
+                },
+                "filters": {
+                    "type": "array",
+                    "description": "Flexible filter specifications (v2) for result filtering",
+                    "items": {"type": "object"}
                 }
             }
         }
-    
+
+    def _build_filters_from_specs(self, filter_specs: List[Dict]) -> List[FilterSpec]:
+        """Build FilterSpecs from flexible filter dictionaries"""
+        return [self._filter_builder.from_dict(spec) for spec in filter_specs]
+
     def generate(self, **kwargs) -> PatternFragment:
         lemma = kwargs["lemma"]
         relation_type = kwargs["relation_type"]
         pos = kwargs.get("pos", "noun")
         retrieve_definitions = kwargs.get("retrieve_definitions", True)
-        
+
+        # Check for flexible filters (v2)
+        filter_specs = kwargs.get("filters")
+        uses_flexible_filters = False
+        additional_filters = ""
+
+        if filter_specs:
+            filters = self._build_filters_from_specs(filter_specs)
+            _, filter_clauses, _ = self._filter_renderer.render(filters)
+            if filter_clauses:
+                additional_filters = f"\n    {filter_clauses}"
+            uses_flexible_filters = True
+
         # Map relation types to property and direction
         relation_map = {
             "hyponym": ("lexinfo:hypernym", "?sense", "?relatedSense"),  # X hypernym Y = Y hyponym X
@@ -339,9 +459,9 @@ class CompLitSemanticRelationPattern(PatternTool):
             "synonym": ("lexinfo:approximateSynonym", "?sense", "?relatedSense"),
             "antonym": ("lexinfo:antonym", "?sense", "?relatedSense")  # X antonym Y
         }
-        
+
         property_name, subject, object_var = relation_map[relation_type]
-        
+
         # Build definition retrieval
         definition_clause = ""
         if retrieve_definitions:
@@ -349,48 +469,53 @@ class CompLitSemanticRelationPattern(PatternTool):
     OPTIONAL {
       ?relatedSense skos:definition ?definition
     } ."""
-        
+
         sparql = f"""
   SERVICE <https://klab.ilc.cnr.it/graphdb-compl-it/> {{
     ?word a ontolex:Word ;
           lexinfo:partOfSpeech [ rdfs:label ?pos ] ;
           ontolex:sense ?sense ;
           ontolex:canonicalForm [ ontolex:writtenRep ?lemma ] .
-    
+
     {subject} {property_name} {object_var} .{definition_clause}
-    
+
     FILTER(str(?pos) = "{pos}") .
-    FILTER(str(?lemma) = "{lemma}") .
-    
+    FILTER(str(?lemma) = "{lemma}") .{additional_filters}
+
     ?relatedWord ontolex:sense ?relatedSense .
   }}"""
-        
+
         output_vars = [
             Variable("?relatedWord", VariableType.WORD, "complit",
                     description=f"CompL-it words that are {relation_type}s"),
             Variable("?relatedSense", VariableType.SENSE, "complit",
                     description=f"Sense representing {relation_type} relation")
         ]
-        
+
         if retrieve_definitions:
             output_vars.append(
                 Variable("?definition", VariableType.DEFINITION, "complit",
                         optional=True, description="Definition of related word")
             )
-        
+
+        applied_filters = ["lemma", "pos"]
+        if uses_flexible_filters:
+            applied_filters.append("flexible_filters")
+
         return PatternFragment(
             pattern_name=self.name,
             sparql=sparql,
             input_vars=[],
             output_vars=output_vars,
             required_prefixes={"ontolex", "lexinfo", "rdfs", "skos"},
-            filters_applied=["lemma", "pos"],
+            filters_applied=applied_filters,
             needs_service_clause=True,
             metadata={
                 "query_type": "semantic_relation",
                 "source_lemma": lemma,
                 "relation": relation_type,
-                "pos": pos
+                "pos": pos,
+                "uses_flexible_filters": uses_flexible_filters
             }
         )
 
@@ -509,6 +634,101 @@ class CompLitWordSenseLookupPattern(PatternTool):
                 "query_type": "word_sense_lookup",
                 "lemma": lemma,
                 "pos": pos
+            }
+        )
+
+
+# ============================================================================
+# PATTERN TOOL 2b-2: CompL-it Definition Linking (Enrichment)
+# ============================================================================
+
+class CompLitDefinitionLinkingPattern(PatternTool):
+    """
+    Links LiITA lemmas to CompL-it to retrieve their definitions.
+
+    Use Case: "Find words with joy emotion and their definitions"
+
+    This is an ENRICHMENT pattern that takes a lemma variable from a previous
+    step and fetches definitions from CompL-it.
+
+    Links via ontolex:canonicalForm - the CompL-it word's canonical form
+    points to the same lemma as LiITA.
+    """
+
+    @property
+    def name(self) -> str:
+        return "complit_definition_linking"
+
+    @property
+    def description(self) -> str:
+        return "Link LiITA lemmas to CompL-it definitions"
+
+    def get_input_schema(self) -> Dict:
+        return {
+            "type": "object",
+            "required": ["liita_lemma_var"],
+            "properties": {
+                "liita_lemma_var": {
+                    "type": "string",
+                    "description": "Variable holding LiITA lemma URI (e.g., '?lemma')"
+                },
+                "pos": {
+                    "type": "string",
+                    "enum": ["noun", "verb", "adjective", "adverb"],
+                    "description": "Optional part-of-speech filter"
+                }
+            }
+        }
+
+    def generate(self, **kwargs) -> PatternFragment:
+        liita_var = kwargs["liita_lemma_var"]
+        pos = kwargs.get("pos")
+
+        if not liita_var.startswith("?"):
+            liita_var = "?" + liita_var
+
+        # Build POS clause if specified
+        pos_clause = ""
+        pos_filter = ""
+        if pos:
+            pos_clause = "\n          lexinfo:partOfSpeech [ rdfs:label ?complitPos ] ;"
+            pos_filter = f'\n    FILTER(str(?complitPos) = "{pos}") .'
+
+        # Link CompL-it word to LiITA lemma via canonicalForm
+        # The CompL-it word's canonical form points to the lemma
+        sparql = f"""
+  ?complitWord a ontolex:Word ;{pos_clause}
+          ontolex:sense ?sense ;
+          ontolex:canonicalForm {liita_var} .
+  OPTIONAL {{
+    ?sense skos:definition ?definition
+  }} .{pos_filter}"""
+
+        # Define input/output variables
+        input_vars = [
+            Variable(liita_var, VariableType.LEMMA, "liita",
+                    description="LiITA lemma URI to link from")
+        ]
+
+        output_vars = [
+            Variable("?complitWord", VariableType.WORD, "complit",
+                    description="CompL-it word entry"),
+            Variable("?sense", VariableType.SENSE, "complit",
+                    description="Lexical sense"),
+            Variable("?definition", VariableType.DEFINITION, "complit",
+                    optional=True, description="Definition text")
+        ]
+
+        return PatternFragment(
+            pattern_name=self.name,
+            sparql=sparql,
+            input_vars=input_vars,
+            output_vars=output_vars,
+            required_prefixes={"ontolex", "lexinfo", "rdfs", "skos"},
+            needs_service_clause=False,  # No SERVICE - links via shared lemma URI
+            metadata={
+                "query_type": "definition_linking",
+                "links_from": liita_var
             }
         )
 
@@ -894,29 +1114,42 @@ class SicilianPatternSearchPattern(PatternTool):
     """
     Searches Sicilian lemmas by written form pattern, then optionally
     links to Italian translations.
-    
+
     Use Case: "Find Sicilian words ending in 'ìa'"
-    
+
     This is different from SicilianTranslationPattern because it starts
     from Sicilian rather than Italian.
+
+    Supports flexible filters (v2) for pattern type and additional filtering.
     """
-    
+
+    def __init__(self):
+        """Initialize with filter system components"""
+        self._filter_renderer = FilterRenderer()
+        self._filter_builder = FilterBuilder()
+
     @property
     def name(self) -> str:
         return "sicilian_pattern_search"
-    
+
     @property
     def description(self) -> str:
         return "Search Sicilian lemmas by pattern, optionally link to Italian"
-    
+
     def get_input_schema(self) -> Dict:
         return {
             "type": "object",
-            "required": ["pattern"],
+            "required": [],
             "properties": {
                 "pattern": {
                     "type": "string",
-                    "description": "Regex pattern for Sicilian written forms"
+                    "description": "Pattern for Sicilian written forms"
+                },
+                "pattern_type": {
+                    "type": "string",
+                    "enum": ["regex", "starts_with", "ends_with", "contains"],
+                    "default": "regex",
+                    "description": "Type of pattern matching"
                 },
                 "pos": {
                     "type": "string",
@@ -927,21 +1160,87 @@ class SicilianPatternSearchPattern(PatternTool):
                     "type": "boolean",
                     "default": True,
                     "description": "Whether to retrieve Italian translations"
+                },
+                "filters": {
+                    "type": "array",
+                    "description": "Flexible filter specifications (v2)",
+                    "items": {"type": "object"}
                 }
             }
         }
-    
+
+    def _build_filters_from_legacy(self, **kwargs) -> List[FilterSpec]:
+        """Build FilterSpecs from legacy parameters"""
+        filters = []
+
+        pattern = kwargs.get("pattern")
+        pattern_type = kwargs.get("pattern_type", "regex")
+
+        if pattern:
+            filters.append(
+                self._filter_builder.written_rep_pattern(
+                    "?sicilianWR", pattern, pattern_type
+                )
+            )
+
+        pos = kwargs.get("pos")
+        if pos:
+            # For Sicilian, POS uses lila:hasPOS
+            filters.append(
+                FilterSpec(
+                    target_variable="?sicilianLemma",
+                    filter_type=FilterType.PROPERTY_EQUALS,
+                    property_path="lila:hasPOS",
+                    value=f"lila:{pos}"
+                )
+            )
+
+        return filters
+
+    def _build_filters_from_specs(self, filter_specs: List[Dict]) -> List[FilterSpec]:
+        """Build FilterSpecs from flexible filter dictionaries.
+
+        Remaps generic variables to Sicilian-specific variables:
+        - ?wr -> ?sicilianWR (written representation)
+        - ?lemma -> ?sicilianLemma (lemma)
+        """
+        filters = []
+        var_remap = {
+            "?wr": "?sicilianWR",
+            "?lemma": "?sicilianLemma",
+        }
+        for spec in filter_specs:
+            target_var = spec.get("target_variable", "")
+            if target_var in var_remap:
+                spec = spec.copy()
+                spec["target_variable"] = var_remap[target_var]
+            filters.append(self._filter_builder.from_dict(spec))
+        return filters
+
     def generate(self, **kwargs) -> PatternFragment:
-        pattern = kwargs["pattern"]
+        # Check for flexible filters (v2) first
+        filter_specs = kwargs.get("filters")
+        uses_flexible_filters = False
+
+        if filter_specs:
+            filters = self._build_filters_from_specs(filter_specs)
+            uses_flexible_filters = True
+        else:
+            filters = self._build_filters_from_legacy(**kwargs)
+
+        # Render filters
+        property_patterns, filter_clauses, _ = self._filter_renderer.render(filters)
+
+        # Legacy parameters for backward compatibility
+        pattern = kwargs.get("pattern", "")
+        pattern_type = kwargs.get("pattern_type", "regex")
         pos = kwargs.get("pos")
         link_to_italian = kwargs.get("link_to_italian", True)
-        
-        # POS filter clause
-        pos_clause = ""
-        pos_filter = ""
-        if pos:
-            pos_clause = "\n                 lila:hasPOS ?pos ."
-            pos_filter = f"\n  FILTER(?pos = lila:{pos}) ."
+
+        # Build POS clause (for property pattern)
+        pos_triple = ""
+        if pos and not uses_flexible_filters:
+            pos_triple = "\n                 lila:hasPOS ?pos ;"
 
         # Italian linking clause
         italian_clause = ""
@@ -952,25 +1251,52 @@ class SicilianPatternSearchPattern(PatternTool):
              ontolex:canonicalForm ?liitaLemma .
   ?liitaLemma ontolex:writtenRep ?italianWR ."""
 
-        # Build the base triple pattern - end with . if no pos_clause, else with ;
-        if pos:
+        # Build filter clause
+        if uses_flexible_filters:
+            # Use rendered property patterns and filter clauses
+            all_filters = ""
+            if property_patterns:
+                all_filters += f"\n  {property_patterns}"
+            if filter_clauses:
+                all_filters += f"\n  {filter_clauses}"
+
             sparql = f"""
   ?sicilianLemma dcterms:isPartOf <http://liita.it/data/id/DialettoSiciliano/lemma/LemmaBank> ;
-                 ontolex:writtenRep ?sicilianWR ;{pos_clause}
-  FILTER(regex(str(?sicilianWR), "{pattern}")) .{pos_filter}{italian_clause}"""
+                 ontolex:writtenRep ?sicilianWR .{all_filters}{italian_clause}"""
         else:
-            sparql = f"""
+            # Legacy mode
+            pattern_filter = ""
+            pos_filter = ""
+            if pattern:
+                filter_map = {
+                    "regex": f'FILTER(regex(str(?sicilianWR), "{pattern}"))',
+                    "starts_with": f'FILTER(strstarts(str(?sicilianWR), "{pattern}"))',
+                    "ends_with": f'FILTER(strends(str(?sicilianWR), "{pattern}"))',
+                    "contains": f'FILTER(contains(str(?sicilianWR), "{pattern}"))'
+                }
+                pattern_filter = filter_map.get(pattern_type, filter_map["regex"])
+
+            if pos:
+                pos_filter = f"\n  FILTER(?pos = lila:{pos}) ."
+
+            if pos:
+                sparql = f"""
+  ?sicilianLemma dcterms:isPartOf <http://liita.it/data/id/DialettoSiciliano/lemma/LemmaBank> ;
+                 ontolex:writtenRep ?sicilianWR ;{pos_triple}
+  {pattern_filter} .{pos_filter}{italian_clause}"""
+            else:
+                sparql = f"""
   ?sicilianLemma dcterms:isPartOf <http://liita.it/data/id/DialettoSiciliano/lemma/LemmaBank> ;
                  ontolex:writtenRep ?sicilianWR .
-  FILTER(regex(str(?sicilianWR), "{pattern}")) .{italian_clause}"""
-        
+  {pattern_filter}{italian_clause}"""
+
         output_vars = [
             Variable("?sicilianLemma", VariableType.LEMMA, "sicilian",
                     description="Sicilian lemma matching pattern"),
             Variable("?sicilianWR", VariableType.WRITTEN_REP, "sicilian",
                     description="Sicilian written representation")
         ]
-        
+
         if link_to_italian:
             output_vars.extend([
                 Variable("?liitaLemma", VariableType.LEMMA, "liita",
@@ -978,123 +1304,230 @@ class SicilianPatternSearchPattern(PatternTool):
                 Variable("?italianWR", VariableType.WRITTEN_REP, "liita",
                         description="Italian written representation")
             ])
-        
-        filters = ["sicilian_pattern"]
+
+        applied_filters = []
+        if pattern or uses_flexible_filters:
+            applied_filters.append("sicilian_pattern")
         if pos:
-            filters.append("pos")
-        
+            applied_filters.append("pos")
+
         return PatternFragment(
             pattern_name=self.name,
             sparql=sparql,
             input_vars=[],
             output_vars=output_vars,
             required_prefixes={"ontolex", "dcterms", "lila", "vartrans"},
-            filters_applied=filters,
+            filters_applied=applied_filters,
             needs_service_clause=False,
             metadata={
                 "query_type": "pattern_search",
                 "dialect": "sicilian",
-                "pattern": pattern
+                "pattern": pattern,
+                "pattern_type": pattern_type,
+                "uses_flexible_filters": uses_flexible_filters
             }
         )
 
 
 # ============================================================================
-# PATTERN TOOL 7: LiITA Basic Query
+# PATTERN TOOL 7: LiITA Basic Query (Refactored with Flexible Filters)
 # ============================================================================
 
 class LiITABasicQueryPattern(PatternTool):
     """
     Queries LiITA Lemma Bank directly without external resources.
-    
+
+    This is the refactored version with flexible filter support.
+
     Use Cases:
     - "How many nouns in LiITA?"
     - "Find lemmas starting with 'infra'"
+    - "Find masculine nouns ending with 'a'"
     - "List all verbs"
+
+    Supports two modes:
+    1. Legacy mode: pos_filter, pattern, pattern_type parameters
+    2. Flexible mode: filters parameter with list of FilterSpec dicts
+
+    The flexible mode enables any combination of filters on:
+    - pos (part of speech)
+    - gender (masculine, feminine, etc.)
+    - inflection_type
+    - written_rep (pattern matching)
     """
-    
+
+    def __init__(self):
+        self._filter_renderer = FilterRenderer()
+        self._filter_builder = FilterBuilder()
+        self._property_registry = PropertyRegistry()
+
     @property
     def name(self) -> str:
         return "liita_basic_query"
-    
+
     @property
     def description(self) -> str:
-        return "Query LiITA Lemma Bank for lemmas with filters"
-    
+        return "Query LiITA Lemma Bank for lemmas with flexible filters"
+
     def get_input_schema(self) -> Dict:
         return {
             "type": "object",
             "properties": {
+                # Legacy parameters (for backward compatibility)
                 "pos_filter": {
                     "type": "string",
                     "enum": ["noun", "verb", "adjective", "adverb", "pronoun", "determiner"],
-                    "description": "Filter by part of speech"
+                    "description": "Filter by part of speech (legacy)"
+                },
+                # New individual filter parameters (convenience)
+                "gender_filter": {
+                    "type": "string",
+                    "enum": ["masculine", "feminine", "neuter"],
+                    "description": "Filter by grammatical gender"
+                },
+                "inflection_filter": {
+                    "type": "string",
+                    "description": "Filter by inflection type"
                 },
                 "pattern": {
                     "type": "string",
-                    "description": "Regex pattern for written representation"
+                    "description": "Regex pattern for written representation (legacy)"
                 },
                 "pattern_type": {
                     "type": "string",
-                    "enum": ["starts_with", "ends_with", "contains", "regex"],
-                    "default": "regex"
+                    "enum": ["starts_with", "ends_with", "contains", "regex", "equals"],
+                    "default": "regex",
+                    "description": "Type of pattern matching (legacy)"
+                },
+                # New flexible filter parameter
+                "filters": {
+                    "type": "array",
+                    "description": "List of FilterSpec dictionaries for flexible filtering",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "target_variable": {"type": "string"},
+                            "filter_type": {"type": "string"},
+                            "value": {"type": "string"},
+                            "property_path": {"type": "string"},
+                            "value_variable": {"type": "string"},
+                            "optional": {"type": "boolean"}
+                        }
+                    }
                 }
             }
         }
-    
-    def generate(self, **kwargs) -> PatternFragment:
+
+    def _build_filters_from_legacy(self, **kwargs) -> List[FilterSpec]:
+        """Convert legacy parameters to FilterSpecs"""
+        filters = []
+
+        # POS filter
         pos_filter = kwargs.get("pos_filter")
-        pattern = kwargs.get("pattern")
-        pattern_type = kwargs.get("pattern_type", "regex")
-        
-        # Build POS clause
-        pos_clause = ""
         if pos_filter:
-            pos_clause = f"?lemma lila:hasPOS lila:{pos_filter} ."
-        
-        # Build pattern filter
-        pattern_filter = ""
+            filters.append(self._filter_builder.pos_filter("?lemma", pos_filter))
+
+        # Gender filter (new convenience parameter)
+        gender_filter = kwargs.get("gender_filter")
+        if gender_filter:
+            filters.append(self._filter_builder.gender_filter("?lemma", gender_filter))
+
+        # Inflection filter (new convenience parameter)
+        inflection_filter = kwargs.get("inflection_filter")
+        if inflection_filter:
+            filters.append(self._filter_builder.inflection_filter("?lemma", inflection_filter))
+
+        # Written rep pattern
+        pattern = kwargs.get("pattern")
         if pattern:
-            if pattern_type == "starts_with":
-                pattern_filter = f'FILTER(regex(str(?wr), "^{pattern}")) .'
-            elif pattern_type == "ends_with":
-                pattern_filter = f'FILTER(regex(str(?wr), "{pattern}$")) .'
-            elif pattern_type == "contains":
-                pattern_filter = f'FILTER(contains(str(?wr), "{pattern}")) .'
-            else:  # regex
-                pattern_filter = f'FILTER(regex(str(?wr), "{pattern}")) .'
-        
+            pattern_type = kwargs.get("pattern_type", "regex")
+            filters.append(
+                self._filter_builder.written_rep_pattern("?wr", pattern, pattern_type)
+            )
+
+        return filters
+
+    def _build_filters_from_specs(self, filter_dicts: List[Dict]) -> List[FilterSpec]:
+        """Convert filter dictionaries to FilterSpec objects"""
+        filters = []
+        for spec_dict in filter_dicts:
+            filters.append(self._filter_builder.from_dict(spec_dict))
+        return filters
+
+    def generate(self, **kwargs) -> PatternFragment:
+        # Determine which filter mode to use
+        filter_specs = kwargs.get("filters")
+
+        if filter_specs:
+            # New flexible mode: use FilterSpec list
+            filters = self._build_filters_from_specs(filter_specs)
+        else:
+            # Legacy mode: convert old parameters to FilterSpecs
+            filters = self._build_filters_from_legacy(**kwargs)
+
+        # Render filters to SPARQL
+        property_patterns, filter_clauses, output_vars = self._filter_renderer.render(filters)
+
+        # Build the SPARQL query with skeleton structure
         sparql = f"""
   GRAPH <http://liita.it/data> {{
-    ?lemma a lila:Lemma .
-    {pos_clause}
-    ?lemma ontolex:writtenRep ?wr .
-    {pattern_filter}
+    ?lemma a lila:Lemma ;
+           ontolex:writtenRep ?wr .
+    {property_patterns}
+    {filter_clauses}
   }}"""
-        
-        filters = []
-        if pos_filter:
-            filters.append("pos")
-        if pattern:
-            filters.append("pattern")
-        
+
+        # Collect filter names for metadata
+        filter_names = []
+        for f in filters:
+            if f.property_path:
+                # Extract property name from path (e.g., "lila:hasPOS" -> "pos")
+                prop_name = f.property_path.split(":")[-1].replace("has", "").lower()
+                filter_names.append(prop_name)
+            elif f.filter_type in [FilterType.REGEX, FilterType.STARTS_WITH,
+                                   FilterType.ENDS_WITH, FilterType.CONTAINS]:
+                filter_names.append("pattern")
+
+        # Collect required prefixes
+        required_prefixes = {"lila", "ontolex"}
+        for f in filters:
+            if f.property_path:
+                prefix = f.property_path.split(":")[0]
+                required_prefixes.add(prefix)
+
+        # Build output variables
+        base_output_vars = [
+            Variable("?lemma", VariableType.LEMMA, "liita",
+                    description="LiITA lemma"),
+            Variable("?wr", VariableType.WRITTEN_REP, "liita",
+                    description="Written representation")
+        ]
+
+        # Add output variables from filters (e.g., ?gender if retrieved)
+        for var_name in output_vars:
+            # Determine variable type
+            if "gender" in var_name.lower():
+                var_type = VariableType.GENDER 
+            elif "pos" in var_name.lower():
+                var_type = VariableType.POS
+            else:
+                var_type = VariableType.LITERAL
+            base_output_vars.append(
+                Variable(var_name, var_type, "liita", optional=True)
+            )
+
         return PatternFragment(
             pattern_name=self.name,
             sparql=sparql,
             input_vars=[],
-            output_vars=[
-                Variable("?lemma", VariableType.LEMMA, "liita",
-                        description="LiITA lemma"),
-                Variable("?wr", VariableType.WRITTEN_REP, "liita",
-                        description="Written representation")
-            ],
-            required_prefixes={"lila", "ontolex"},
-            filters_applied=filters,
+            output_vars=base_output_vars,
+            required_prefixes=required_prefixes,
+            filters_applied=filter_names,
             needs_service_clause=False,
             metadata={
                 "query_type": "basic_liita",
-                "pos": pos_filter,
-                "pattern": pattern
+                "filter_count": len(filters),
+                "uses_flexible_filters": filter_specs is not None
             }
         )
 
@@ -1126,7 +1559,7 @@ class AggregationPattern(PatternTool):
             "properties": {
                 "aggregation_type": {
                     "type": "string",
-                    "enum": ["count", "group_concat", "distinct"],
+                    "enum": ["count", "group_concat", "distinct", "avg", "sum", "min", "max"],
                     "description": "Type of aggregation"
                 },
                 "aggregate_var": {
@@ -1172,15 +1605,30 @@ class AggregationPattern(PatternTool):
         }
         
         # Generate SELECT clause modification
+        # For COUNT: include grouped variables in select_clause (assembler returns it as-is)
+        # For GROUP_CONCAT: assembler adds group vars separately, so don't duplicate here
         select_clause = ""
         if agg_type == "count":
-            select_clause = f"(COUNT(*) as ?count)"
+            group_vars_select = ""
+            if group_by_vars:
+                group_vars_select = " ".join([v if v.startswith("?") else "?" + v for v in group_by_vars]) + " "
+            select_clause = f"{group_vars_select}(COUNT(*) as ?count)"
         elif agg_type == "group_concat":
-            if not aggregate_var.startswith("?"):
+            if aggregate_var and not aggregate_var.startswith("?"):
                 aggregate_var = "?" + aggregate_var
             select_clause = f"(GROUP_CONCAT(str({aggregate_var}); SEPARATOR=\"{separator}\") AS ?aggregated)"
         elif agg_type == "distinct":
             select_clause = "DISTINCT"
+        elif agg_type in ("avg", "sum", "min", "max"):
+            # Numeric aggregations require an aggregate_var
+            if aggregate_var and not aggregate_var.startswith("?"):
+                aggregate_var = "?" + aggregate_var
+            group_vars_select = ""
+            if group_by_vars:
+                group_vars_select = " ".join([v if v.startswith("?") else "?" + v for v in group_by_vars]) + " "
+            agg_func = agg_type.upper()
+            result_var = f"?{agg_type}Value"
+            select_clause = f"{group_vars_select}({agg_func}({aggregate_var}) as {result_var})"
         
         group_by_clause = ""
         if group_by_vars:
@@ -1286,27 +1734,39 @@ class ParmigianoPatternSearchPattern(PatternTool):
     """
     Searches Parmigiano lemmas by written form pattern, then optionally
     links to Italian translations.
-    
+
     Use Case: "Find Parmigiano words ending in 'ìa'"
-    
+
+    Supports flexible filters (v2) for pattern type and additional filtering.
     """
-    
+
+    def __init__(self):
+        """Initialize with filter system components"""
+        self._filter_renderer = FilterRenderer()
+        self._filter_builder = FilterBuilder()
+
     @property
     def name(self) -> str:
         return "parmigiano_pattern_search"
-    
+
     @property
     def description(self) -> str:
         return "Search Parmigiano lemmas by pattern, optionally link to Italian"
-    
+
     def get_input_schema(self) -> Dict:
         return {
             "type": "object",
-            "required": ["pattern"],
+            "required": [],
             "properties": {
                 "pattern": {
                     "type": "string",
-                    "description": "Regex pattern for Parmigiano written forms"
+                    "description": "Pattern for Parmigiano written forms"
+                },
+                "pattern_type": {
+                    "type": "string",
+                    "enum": ["regex", "starts_with", "ends_with", "contains"],
+                    "default": "regex",
+                    "description": "Type of pattern matching"
                 },
                 "pos": {
                     "type": "string",
@@ -1317,21 +1777,87 @@ class ParmigianoPatternSearchPattern(PatternTool):
                     "type": "boolean",
                     "default": True,
                     "description": "Whether to retrieve Italian translations"
+                },
+                "filters": {
+                    "type": "array",
+                    "description": "Flexible filter specifications (v2)",
+                    "items": {"type": "object"}
                 }
             }
         }
-    
+
+    def _build_filters_from_legacy(self, **kwargs) -> List[FilterSpec]:
+        """Build FilterSpecs from legacy parameters"""
+        filters = []
+
+        pattern = kwargs.get("pattern")
+        pattern_type = kwargs.get("pattern_type", "regex")
+
+        if pattern:
+            filters.append(
+                self._filter_builder.written_rep_pattern(
+                    "?parmigianoWR", pattern, pattern_type
+                )
+            )
+
+        pos = kwargs.get("pos")
+        if pos:
+            # For Parmigiano, POS uses lila:hasPOS
+            filters.append(
+                FilterSpec(
+                    target_variable="?parmigianoLemma",
+                    filter_type=FilterType.PROPERTY_EQUALS,
+                    property_path="lila:hasPOS",
+                    value=f"lila:{pos}"
+                )
+            )
+
+        return filters
+
+    def _build_filters_from_specs(self, filter_specs: List[Dict]) -> List[FilterSpec]:
+        """Build FilterSpecs from flexible filter dictionaries.
+
+        Remaps generic variables to Parmigiano-specific variables:
+        - ?wr -> ?parmigianoWR (written representation)
+        - ?lemma -> ?parmigianoLemma (lemma)
+        """
+        filters = []
+        var_remap = {
+            "?wr": "?parmigianoWR",
+            "?lemma": "?parmigianoLemma",
+        }
+        for spec in filter_specs:
+            target_var = spec.get("target_variable", "")
+            if target_var in var_remap:
+                spec = spec.copy()
+                spec["target_variable"] = var_remap[target_var]
+            filters.append(self._filter_builder.from_dict(spec))
+        return filters
+
     def generate(self, **kwargs) -> PatternFragment:
-        pattern = kwargs["pattern"]
+        # Check for flexible filters (v2) first
+        filter_specs = kwargs.get("filters")
+        uses_flexible_filters = False
+
+        if filter_specs:
+            filters = self._build_filters_from_specs(filter_specs)
+            uses_flexible_filters = True
+        else:
+            filters = self._build_filters_from_legacy(**kwargs)
+
+        # Render filters
+        property_patterns, filter_clauses, _ = self._filter_renderer.render(filters)
+
+        # Legacy parameters for backward compatibility
+        pattern = kwargs.get("pattern", "")
+        pattern_type = kwargs.get("pattern_type", "regex")
         pos = kwargs.get("pos")
         link_to_italian = kwargs.get("link_to_italian", True)
-        
-        # POS filter clause
-        pos_clause = ""
-        pos_filter = ""
-        if pos:
-            pos_clause = "\n                 lila:hasPOS ?pos ."
-            pos_filter = f"\n  FILTER(?pos = lila:{pos}) ."
+
+        # Build POS clause (for property pattern)
+        pos_triple = ""
+        if pos and not uses_flexible_filters:
+            pos_triple = "\n                 lila:hasPOS ?pos ;"
 
         # Italian linking clause
         italian_clause = ""
@@ -1342,25 +1868,52 @@ class ParmigianoPatternSearchPattern(PatternTool):
              ontolex:canonicalForm ?liitaLemma .
   ?liitaLemma ontolex:writtenRep ?italianWR ."""
 
-        # Build the base triple pattern - end with . if no pos_clause, else with ;
-        if pos:
+        # Build filter clause
+        if uses_flexible_filters:
+            # Use rendered property patterns and filter clauses
+            all_filters = ""
+            if property_patterns:
+                all_filters += f"\n  {property_patterns}"
+            if filter_clauses:
+                all_filters += f"\n  {filter_clauses}"
+
             sparql = f"""
   ?parmigianoLemma dcterms:isPartOf <http://liita.it/data/id/DialettoParmigiano/lemma/LemmaBank> ;
-                 ontolex:writtenRep ?parmigianoWR ;{pos_clause}
-  FILTER(regex(str(?parmigianoWR), "{pattern}")) .{pos_filter}{italian_clause}"""
+                 ontolex:writtenRep ?parmigianoWR .{all_filters}{italian_clause}"""
         else:
-            sparql = f"""
+            # Legacy mode
+            pattern_filter = ""
+            pos_filter = ""
+            if pattern:
+                filter_map = {
+                    "regex": f'FILTER(regex(str(?parmigianoWR), "{pattern}"))',
+                    "starts_with": f'FILTER(strstarts(str(?parmigianoWR), "{pattern}"))',
+                    "ends_with": f'FILTER(strends(str(?parmigianoWR), "{pattern}"))',
+                    "contains": f'FILTER(contains(str(?parmigianoWR), "{pattern}"))'
+                }
+                pattern_filter = filter_map.get(pattern_type, filter_map["regex"])
+
+            if pos:
+                pos_filter = f"\n  FILTER(?pos = lila:{pos}) ."
+
+            if pos:
+                sparql = f"""
+  ?parmigianoLemma dcterms:isPartOf <http://liita.it/data/id/DialettoParmigiano/lemma/LemmaBank> ;
+                 ontolex:writtenRep ?parmigianoWR ;{pos_triple}
+  {pattern_filter} .{pos_filter}{italian_clause}"""
+            else:
+                sparql = f"""
   ?parmigianoLemma dcterms:isPartOf <http://liita.it/data/id/DialettoParmigiano/lemma/LemmaBank> ;
                  ontolex:writtenRep ?parmigianoWR .
-  FILTER(regex(str(?parmigianoWR), "{pattern}")) .{italian_clause}"""
-        
+  {pattern_filter}{italian_clause}"""
+
         output_vars = [
             Variable("?parmigianoLemma", VariableType.LEMMA, "parmigiano",
                     description="Parmigiano lemma matching pattern"),
             Variable("?parmigianoWR", VariableType.WRITTEN_REP, "parmigiano",
                     description="Parmigiano written representation")
         ]
-        
+
         if link_to_italian:
             output_vars.extend([
                 Variable("?liitaLemma", VariableType.LEMMA, "liita",
@@ -1368,23 +1921,27 @@ class ParmigianoPatternSearchPattern(PatternTool):
                 Variable("?italianWR", VariableType.WRITTEN_REP, "liita",
                         description="Italian written representation")
             ])
-        
-        filters = ["parmigiano_pattern"]
+
+        applied_filters = []
+        if pattern or uses_flexible_filters:
+            applied_filters.append("parmigiano_pattern")
         if pos:
-            filters.append("pos")
-        
+            applied_filters.append("pos")
+
         return PatternFragment(
             pattern_name=self.name,
             sparql=sparql,
             input_vars=[],
             output_vars=output_vars,
             required_prefixes={"ontolex", "dcterms", "lila", "vartrans"},
-            filters_applied=filters,
+            filters_applied=applied_filters,
             needs_service_clause=False,
             metadata={
                 "query_type": "pattern_search",
                 "dialect": "parmigiano",
-                "pattern": pattern
+                "pattern": pattern,
+                "pattern_type": pattern_type,
+                "uses_flexible_filters": uses_flexible_filters
             }
         )
 
@@ -1396,24 +1953,31 @@ class ParmigianoPatternSearchPattern(PatternTool):
 class SentixLinkingPattern(PatternTool):
     """
     Links LiITA lemmas to Sentix affective lexicon entries.
-    
+
     Use Case: "What is the polarity of X?", "Show Sentix sentiment for Y"
-    
+
     Based on the paper's SPARQL queries, Sentix uses:
     - marl:hasPolarity for polarity type (Positive/Negative/Neutral)
     - marl:hasPolarityValue for numeric score (-1 to +1)
-    
+
     Linking via ontolex:canonicalForm (simpler than dialect patterns).
+
+    Supports flexible filters (v2) for polarity filtering.
     """
-    
+
+    def __init__(self):
+        """Initialize with filter system components"""
+        self._filter_renderer = FilterRenderer()
+        self._filter_builder = FilterBuilder()
+
     @property
     def name(self) -> str:
         return "sentix_linking"
-    
+
     @property
     def description(self) -> str:
         return "Link LiITA lemmas to Sentix affective lexicon entries"
-    
+
     def get_input_schema(self) -> Dict:
         return {
             "type": "object",
@@ -1445,57 +2009,114 @@ class SentixLinkingPattern(PatternTool):
                 "polarity_value_max": {
                     "type": "number",
                     "description": "Optional maximum polarity value filter"
+                },
+                "filters": {
+                    "type": "array",
+                    "description": "Flexible filter specifications (v2)",
+                    "items": {"type": "object"}
                 }
             }
         }
-    
+
+    def _build_filters_from_legacy(self, **kwargs) -> List[FilterSpec]:
+        """Build FilterSpecs from legacy parameters"""
+        filters = []
+
+        polarity_filter = kwargs.get("polarity_filter")
+        if polarity_filter:
+            # Polarity type filter on label
+            filters.append(
+                FilterSpec(
+                    target_variable="?polarityLabel",
+                    filter_type=FilterType.EQUALS,
+                    value=f'"{polarity_filter}"@en'
+                )
+            )
+
+        polarity_value_min = kwargs.get("polarity_value_min")
+        if polarity_value_min is not None:
+            filters.append(
+                self._filter_builder.polarity_value_min("?polarityValue", polarity_value_min)
+            )
+
+        polarity_value_max = kwargs.get("polarity_value_max")
+        if polarity_value_max is not None:
+            filters.append(
+                self._filter_builder.polarity_value_max("?polarityValue", polarity_value_max)
+            )
+
+        return filters
+
+    def _build_filters_from_specs(self, filter_specs: List[Dict]) -> List[FilterSpec]:
+        """Build FilterSpecs from flexible filter dictionaries"""
+        return [self._filter_builder.from_dict(spec) for spec in filter_specs]
+
     def generate(self, **kwargs) -> PatternFragment:
         liita_var = kwargs["liita_lemma_var"]
         retrieve_polarity_type = kwargs.get("retrieve_polarity_type", True)
         retrieve_polarity_value = kwargs.get("retrieve_polarity_value", True)
-        polarity_filter = kwargs.get("polarity_filter")
-        polarity_value_min = kwargs.get("polarity_value_min")
-        polarity_value_max = kwargs.get("polarity_value_max")
-        
+
         if not liita_var.startswith("?"):
             liita_var = "?" + liita_var
-        
+
+        # Check for flexible filters (v2) first
+        filter_specs = kwargs.get("filters")
+        uses_flexible_filters = False
+
+        if filter_specs:
+            filters = self._build_filters_from_specs(filter_specs)
+            uses_flexible_filters = True
+        else:
+            filters = self._build_filters_from_legacy(**kwargs)
+
+        # Render filters
+        _, filter_clauses, _ = self._filter_renderer.render(filters)
+
         # Build SPARQL pattern
         sparql_parts = [
             f"  ?sentixLemma ontolex:canonicalForm {liita_var} ."
         ]
-        
+
         # Add polarity type retrieval
         if retrieve_polarity_type:
             sparql_parts.append("  ?sentixLemma marl:hasPolarity ?polarity .")
             sparql_parts.append("  ?polarity rdfs:label ?polarityLabel .")
-        
+
         # Add polarity value retrieval
         if retrieve_polarity_value:
             sparql_parts.append("  ?sentixLemma marl:hasPolarityValue ?polarityValue .")
-        
-        # Add filters
-        filters = []
-        if polarity_filter:
-            sparql_parts.append(f'  FILTER(?polarityLabel = "{polarity_filter}"@en) .')
-            filters.append("polarity_type")
-        
-        if polarity_value_min is not None:
-            sparql_parts.append(f"  FILTER(?polarityValue >= {polarity_value_min}) .")
-            filters.append("polarity_value_min")
-        
-        if polarity_value_max is not None:
-            sparql_parts.append(f"  FILTER(?polarityValue <= {polarity_value_max}) .")
-            filters.append("polarity_value_max")
-        
+
+        # Add filters (either legacy or flexible)
+        applied_filters = []
+        if uses_flexible_filters and filter_clauses:
+            sparql_parts.append(f"  {filter_clauses}")
+            applied_filters.append("flexible_filters")
+        elif not uses_flexible_filters:
+            # Legacy filter handling
+            polarity_filter = kwargs.get("polarity_filter")
+            polarity_value_min = kwargs.get("polarity_value_min")
+            polarity_value_max = kwargs.get("polarity_value_max")
+
+            if polarity_filter:
+                sparql_parts.append(f'  FILTER(?polarityLabel = "{polarity_filter}"@en) .')
+                applied_filters.append("polarity_type")
+
+            if polarity_value_min is not None:
+                sparql_parts.append(f"  FILTER(?polarityValue >= {polarity_value_min}) .")
+                applied_filters.append("polarity_value_min")
+
+            if polarity_value_max is not None:
+                sparql_parts.append(f"  FILTER(?polarityValue <= {polarity_value_max}) .")
+                applied_filters.append("polarity_value_max")
+
         sparql = "\n".join(sparql_parts)
-        
+
         # Define output variables
         output_vars = [
             Variable("?sentixLemma", VariableType.LEMMA, "sentix",
                     description="Sentix lemma entry")
         ]
-        
+
         if retrieve_polarity_type:
             output_vars.extend([
                 Variable("?polarity", VariableType.WRITTEN_REP, "sentix",
@@ -1503,13 +2124,13 @@ class SentixLinkingPattern(PatternTool):
                 Variable("?polarityLabel", VariableType.WRITTEN_REP, "sentix",
                         description="Polarity label (Positive/Negative/Neutral)")
             ])
-        
+
         if retrieve_polarity_value:
             output_vars.append(
                 Variable("?polarityValue", VariableType.WRITTEN_REP, "sentix",
                         description="Polarity numeric value (-1 to +1)")
             )
-        
+
         return PatternFragment(
             pattern_name=self.name,
             sparql=sparql,
@@ -1519,12 +2140,13 @@ class SentixLinkingPattern(PatternTool):
             ],
             output_vars=output_vars,
             required_prefixes={"ontolex", "marl", "rdfs"},
-            filters_applied=filters,
+            filters_applied=applied_filters,
             needs_service_clause=False,
             metadata={
                 "resource": "sentix",
                 "retrieve_polarity_type": retrieve_polarity_type,
-                "retrieve_polarity_value": retrieve_polarity_value
+                "retrieve_polarity_value": retrieve_polarity_value,
+                "uses_flexible_filters": uses_flexible_filters
             }
         )
 
@@ -1587,22 +2209,29 @@ class ELItaLinkingPattern(PatternTool):
     Links LiITA lemmas to ELIta emotion lexicon entries.
 
     Use Case: "What emotions are associated with X?", "Show ELIta emotions for Y"
-    
+
     Based on the paper's SPARQL queries, ELIta uses:
     - elita:HasEmotion for emotion instances (elita:Gioia, elita:Tristezza, etc.)
     - Emotions have rdfs:label for readable names
-    
+
     Linking via ontolex:canonicalForm (simpler than dialect patterns).
+
+    Supports flexible filters (v2) for emotion filtering.
     """
-    
+
+    def __init__(self):
+        """Initialize with filter system components"""
+        self._filter_renderer = FilterRenderer()
+        self._filter_builder = FilterBuilder()
+
     @property
     def name(self) -> str:
         return "elita_linking"
-    
+
     @property
     def description(self) -> str:
         return "Link LiITA lemmas to ELIta emotion lexicon entries"
-    
+
     def get_input_schema(self) -> Dict:
         return {
             "type": "object",
@@ -1621,9 +2250,33 @@ class ELItaLinkingPattern(PatternTool):
                     "type": "boolean",
                     "default": True,
                     "description": "Whether to retrieve emotion labels"
+                },
+                "filters": {
+                    "type": "array",
+                    "description": "Flexible filter specifications (v2)",
+                    "items": {"type": "object"}
                 }
             }
         }
+
+    def _resolve_emotion_iris(self, emotion_filters: List[str]) -> List[str]:
+        """Resolve emotion keywords to ELIta IRIs"""
+        emotion_iris = []
+        for term in emotion_filters:
+            term_lower = term.lower().strip()
+            if term_lower in EMOTION_MAP:
+                iri = EMOTION_MAP[term_lower]
+                if iri not in emotion_iris:
+                    emotion_iris.append(iri)
+            else:
+                # Not in map - might be a direct ELIta name like "Gioia"
+                # Try prefixing with elita:
+                emotion_iris.append(f"elita:{term}")
+        return emotion_iris
+
+    def _build_filters_from_specs(self, filter_specs: List[Dict]) -> List[FilterSpec]:
+        """Build FilterSpecs from flexible filter dictionaries"""
+        return [self._filter_builder.from_dict(spec) for spec in filter_specs]
 
     def generate(self, **kwargs) -> PatternFragment:
         liita_var = kwargs["liita_lemma_var"]
@@ -1633,30 +2286,30 @@ class ELItaLinkingPattern(PatternTool):
         if not liita_var.startswith("?"):
             liita_var = "?" + liita_var
 
+        # Check for flexible filters (v2)
+        filter_specs = kwargs.get("filters")
+        uses_flexible_filters = False
+        additional_filter_clauses = ""
+
+        if filter_specs:
+            filters = self._build_filters_from_specs(filter_specs)
+            _, filter_clauses, _ = self._filter_renderer.render(filters)
+            if filter_clauses:
+                additional_filter_clauses = f"\n  {filter_clauses}"
+            uses_flexible_filters = True
+
         # Build SPARQL pattern
         sparql_parts = []
 
         # Resolve emotion keywords to ELIta IRIs using EMOTION_MAP
-        emotion_iris = []
-        label_filters = []
-        if emotion_filters:
-            for term in emotion_filters:
-                term_lower = term.lower().strip()
-                if term_lower in EMOTION_MAP:
-                    iri = EMOTION_MAP[term_lower]
-                    if iri not in emotion_iris:
-                        emotion_iris.append(iri)
-                else:
-                    # Not in map - might be a direct ELIta name like "Gioia"
-                    # Try prefixing with elita:
-                    emotion_iris.append(f"elita:{term}")
+        emotion_iris = self._resolve_emotion_iris(emotion_filters)
 
         # If we have emotion IRIs, use VALUES clause (cleaner and more efficient)
-        filters = []
+        applied_filters = []
         if emotion_iris:
             values_str = " ".join(emotion_iris)
             sparql_parts.append(f"  VALUES ?emotion {{ {values_str} }}")
-            filters.append("emotion_type")
+            applied_filters.append("emotion_type")
 
         sparql_parts.extend([
             f"  ?elitaLemma ontolex:canonicalForm {liita_var} .",
@@ -1666,9 +2319,14 @@ class ELItaLinkingPattern(PatternTool):
         # Add emotion label retrieval
         if retrieve_emotion_label:
             sparql_parts.append("  ?emotion rdfs:label ?emotionLabel .")
-        
+
+        # Add flexible filter clauses if any
+        if additional_filter_clauses:
+            sparql_parts.append(additional_filter_clauses)
+            applied_filters.append("flexible_filters")
+
         sparql = "\n".join(sparql_parts)
-        
+
         # Define output variables
         output_vars = [
             Variable("?elitaLemma", VariableType.LEMMA, "elita",
@@ -1676,13 +2334,13 @@ class ELItaLinkingPattern(PatternTool):
             Variable("?emotion", VariableType.WRITTEN_REP, "elita",
                     description="Emotion instance (e.g., elita:Gioia)")
         ]
-        
+
         if retrieve_emotion_label:
             output_vars.append(
                 Variable("?emotionLabel", VariableType.WRITTEN_REP, "elita",
                         description="Emotion label (e.g., 'Gioia', 'Tristezza')")
             )
-        
+
         return PatternFragment(
             pattern_name=self.name,
             sparql=sparql,
@@ -1692,11 +2350,12 @@ class ELItaLinkingPattern(PatternTool):
             ],
             output_vars=output_vars,
             required_prefixes={"ontolex", "elita", "rdfs"},
-            filters_applied=filters,
+            filters_applied=applied_filters,
             needs_service_clause=False,
             metadata={
                 "resource": "elita",
-                "emotion_filters": emotion_filters
+                "emotion_filters": emotion_filters,
+                "uses_flexible_filters": uses_flexible_filters
             }
         )
 
@@ -1721,6 +2380,7 @@ class PatternToolRegistry:
             CompLitDefinitionSearchPattern(),
             CompLitSemanticRelationPattern(),
             CompLitWordSenseLookupPattern(),
+            CompLitDefinitionLinkingPattern(),
             CompLitRelationBetweenLemmasPattern(),
             BridgePattern(),
             ParmigianoTranslationPattern(),

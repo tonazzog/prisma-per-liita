@@ -67,7 +67,7 @@ class Intent:
     """
     query_type: QueryType
     required_resources: List[ResourceType]
-    
+
     # Search criteria
     lemma: Optional[str] = None
     lemma_b: Optional[str] = None  # Second lemma for relation checking queries
@@ -76,21 +76,25 @@ class Intent:
     pattern_type: Optional[str] = None  # starts_with, contains, ends_with, regex
     written_form_pattern: Optional[str] = None
     semantic_relation: Optional[SemanticRelationType] = None
-    
-    # Filters
+
+    # Additional grammatical filters (v2)
+    gender: Optional[str] = None  # masculine, feminine, neuter, common
+    inflection_type: Optional[str] = None  # Inflection/declension type
+
+    # Flexible filters (v2) - list of FilterSpec-compatible dicts
     filters: List[Dict[str, Any]] = field(default_factory=list)
-    
+
     # Aggregation needs
     aggregation: Optional[Dict[str, Any]] = None
-    
+
     # Output requirements
     retrieve_definitions: bool = True
     retrieve_examples: bool = False
     include_italian_written_rep: bool = True
-    
+
     # Complexity indicator
     complexity_score: int = 1
-    
+
     # Raw user query for debugging
     user_query: str = ""
 
@@ -354,6 +358,9 @@ class PatternOrchestrator:
                 "retrieve_polarity_type": True,
                 "retrieve_polarity_value": True
             }
+            # Pass filters for Sentix (polarity filters)
+            if intent.filters:
+                sentix_params["filters"] = intent.filters
             steps.append(PatternStep(
                 tool_name="sentix_linking",
                 parameters=sentix_params,
@@ -369,6 +376,9 @@ class PatternOrchestrator:
                 "liita_lemma_var": lemma_var,
                 "retrieve_emotion_label": True
             }
+            # Pass filters for ELIta (emotion filters)
+            if intent.filters:
+                elita_params["filters"] = intent.filters
             steps.append(PatternStep(
                 tool_name="elita_linking",
                 parameters=elita_params,
@@ -396,6 +406,22 @@ class PatternOrchestrator:
                 parameters={"italian_lemma_var": lemma_var},
                 step_number=step_num,
                 description="Link to Sicilian translations",
+                depends_on=[base_step_num]
+            ))
+            step_num += 1
+
+        # CompL-it definition enrichment (when definitions are needed but not primary query)
+        if ResourceType.COMPLIT in intent.required_resources and intent.retrieve_definitions:
+            complit_params = {
+                "liita_lemma_var": lemma_var  # Link via lemma URI (canonicalForm)
+            }
+            if intent.pos:
+                complit_params["pos"] = intent.pos
+            steps.append(PatternStep(
+                tool_name="complit_definition_linking",
+                parameters=complit_params,
+                step_number=step_num,
+                description="Link to CompL-it for definitions",
                 depends_on=[base_step_num]
             ))
             step_num += 1
@@ -484,29 +510,51 @@ class PatternOrchestrator:
     def _plan_basic_lookup(self, intent: Intent) -> ExecutionPlan:
         """
         Plan for basic LiITA queries (no external resources).
-        
+
         Example: "How many nouns in LiITA?"
         Example: "Find lemmas starting with 'infra'"
+        Example: "Find masculine nouns ending with 'a'" (v2)
         """
         steps = []
         step_num = 1
-        
+
         # Step 1: LiITA basic query
         params = {}
+
+        # Check if we have flexible filters (v2 mode)
+        if intent.filters:
+            # Pass flexible filters directly to the pattern
+            params["filters"] = intent.filters
+        else:
+            # Legacy mode: use individual parameters
+            if intent.pos:
+                params["pos_filter"] = intent.pos
+            if intent.written_form_pattern:
+                params["pattern"] = intent.written_form_pattern
+                params["pattern_type"] = intent.pattern_type or "regex"
+
+            # New v2 parameters (convenience mode)
+            if intent.gender:
+                params["gender_filter"] = intent.gender
+            if intent.inflection_type:
+                params["inflection_filter"] = intent.inflection_type
+
+        # Build description
+        desc_parts = []
         if intent.pos:
-            params["pos_filter"] = intent.pos
-        if intent.written_form_pattern:
-            params["pattern"] = intent.written_form_pattern
-            params["pattern_type"] = intent.pattern_type or "regex"
-        
+            desc_parts.append(intent.pos)
+        if intent.gender:
+            desc_parts.append(intent.gender)
+        desc = " ".join(desc_parts) if desc_parts else "all"
+
         steps.append(PatternStep(
             tool_name="liita_basic_query",
             parameters=params,
             step_number=step_num,
-            description=f"Query LiITA Lemma Bank for {intent.pos or 'all'} lemmas"
+            description=f"Query LiITA Lemma Bank for {desc} lemmas"
         ))
         step_num += 1
-        
+
         # Step 2: Aggregation if needed
         if intent.aggregation:
             steps.append(PatternStep(
@@ -516,7 +564,7 @@ class PatternOrchestrator:
                 description=f"Apply {intent.aggregation['type']} aggregation",
                 depends_on=[1]
             ))
-        
+
         return ExecutionPlan(
             steps=steps,
             intent=intent,
@@ -546,12 +594,16 @@ class PatternOrchestrator:
         }
         if intent.pos:
             service_params["pos_filter"] = intent.pos
-        
+
+        # Pass filters directly (v2 mode)
+        if intent.filters:
+            service_params["filters"] = intent.filters
+
         steps.append(PatternStep(
             tool_name="complit_definition_search",
             parameters=service_params,
             step_number=step_num,
-            description=f"Search CompL-it for definitions {intent.pattern_type} '{intent.definition_pattern}'",
+            description=f"Search CompL-it for definitions {intent.pattern_type or 'matching'} '{intent.definition_pattern or 'pattern'}'",
         ))
         step_num += 1
         
@@ -621,7 +673,11 @@ class PatternOrchestrator:
             "pos": intent.pos or "noun",
             "retrieve_definitions": intent.retrieve_definitions
         }
-        
+
+        # Pass filters directly (v2 mode)
+        if intent.filters:
+            service_params["filters"] = intent.filters
+
         steps.append(PatternStep(
             tool_name="complit_semantic_relation",
             parameters=service_params,
@@ -808,6 +864,9 @@ class PatternOrchestrator:
             }
             if intent.pos:
                 params["pos"] = intent.pos
+            # Pass filters directly (v2 mode)
+            if intent.filters:
+                params["filters"] = intent.filters
 
             steps.append(PatternStep(
                 tool_name=tool_name,
@@ -825,6 +884,9 @@ class PatternOrchestrator:
             }
             if intent.pos:
                 params["pos"] = intent.pos
+            # Pass filters directly (v2 mode)
+            if intent.filters:
+                params["filters"] = intent.filters
 
             steps.append(PatternStep(
                 tool_name="parmigiano_pattern_search",
@@ -987,17 +1049,11 @@ class PatternOrchestrator:
             "retrieve_polarity_type": True,
             "retrieve_polarity_value": True
         }
-        
-        # Add polarity filters if specified in intent
+
+        # Pass filters directly (v2 mode)
         if intent.filters:
-            for filter_item in intent.filters:
-                if filter_item.get('field') == 'polarity_type':
-                    sentix_params["polarity_filter"] = filter_item.get('value')
-                elif filter_item.get('field') == 'polarity_value_min':
-                    sentix_params["polarity_value_min"] = filter_item.get('value')
-                elif filter_item.get('field') == 'polarity_value_max':
-                    sentix_params["polarity_value_max"] = filter_item.get('value')
-        
+            sentix_params["filters"] = intent.filters
+
         steps.append(PatternStep(
             tool_name="sentix_linking",
             parameters=sentix_params,
@@ -1063,17 +1119,11 @@ class PatternOrchestrator:
             "liita_lemma_var": "?lemma" if intent.lemma or intent.written_form_pattern else "?lemma",
             "retrieve_emotion_label": True
         }
-        
-        # Extract emotion filters from intent
-        emotion_filters = []
+
+        # Pass filters directly (v2 mode)
         if intent.filters:
-            for filter_item in intent.filters:
-                if filter_item.get('field') == 'emotion':
-                    emotion_filters.append(filter_item.get('value'))
-        
-        if emotion_filters:
-            elita_params["emotion_filters"] = emotion_filters
-        
+            elita_params["filters"] = intent.filters
+
         steps.append(PatternStep(
             tool_name="elita_linking",
             parameters=elita_params,

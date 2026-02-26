@@ -195,7 +195,11 @@ class SPARQLComposer:
                 if last_fragment:
                     vars_str = " ".join([str(v) for v in last_fragment.output_vars])
                     return f"SELECT DISTINCT {vars_str}"
-        
+
+            elif agg_meta['type'] in ('avg', 'sum', 'min', 'max'):
+                # Numeric aggregations - select_clause already contains everything needed
+                return f"SELECT {select_clause}"
+
         # No aggregation - select all output variables from all fragments
         if fragments:
             # Collect all unique output variables

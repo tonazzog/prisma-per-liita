@@ -6,6 +6,8 @@ PRISMA per LiITA - Gradio Web UI
 A user-friendly web interface for the PRISMA NL2SPARQL system.
 Shows the complete pipeline with intermediate results for transparency.
 
+Now uses prisma with the flexible filter system.
+
 Usage:
     python -m app.gradio_app
     python -m app.gradio_app --provider anthropic --model claude-sonnet-4-20250514
@@ -24,6 +26,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+# Use prisma with flexible filter system
 from prisma import Translator, TranslationResult, create_llm_client
 
 
@@ -36,16 +39,24 @@ DEFAULT_TIMEOUT = 30
 
 # Example queries for the UI
 EXAMPLE_QUERIES = [
-    "What is the polarity of the word 'amore'?",
-    "Find the hyponyms of 'colore' with their definitions",
-    "What emotion is associated with 'felicità'?",
-    "Find meronyms of 'corpo' with their Sicilian translation",
-    "Translate 'casa' to Parmigiano dialect",
-    "Find Sicilian nouns ending in 'ìa'",
-    "How many nouns are in LiITA?",
-    "Find words whose definition starts with 'uccello'",
-    "What are the synonyms of 'origine'?",
+    # Basic queries with filters
+    "Find all masculine nouns ending with 'a'",
+    "How many verbs are in LiITA?",
     "Find lemmas starting with 'infra'",
+    # Semantic relations
+    "Find the hyponyms of 'colore' with their definitions",
+    "What are the synonyms of 'origine'?",
+    "Find meronyms of 'corpo'",
+    # Affective queries
+    "Find strongly positive words (polarity > 0.5)",
+    "What is the polarity of the word 'amore'?",
+    "Find words associated with joy",
+    # Dialect queries
+    "Find Sicilian nouns ending in 'ìa'",
+    "Translate 'figlio' to Parmigiano dialect",
+    "Find neuter Sicilian nouns",
+    # Definition search
+    "Find nouns whose definition contains 'animale'",
 ]
 
 
@@ -151,18 +162,30 @@ def format_intent_analysis(result: TranslationResult) -> str:
     if intent.get('lemma_b'):
         lines.append(f"- **Second Lemma:** `{intent['lemma_b']}`")
 
-    if intent.get('pos'):
-        lines.append(f"- **Part of Speech:** {intent['pos']}")
-
     if intent.get('semantic_relation'):
         lines.append(f"- **Semantic Relation:** {intent['semantic_relation']}")
 
-    if intent.get('definition_pattern'):
-        pattern_type = intent.get('pattern_type', 'contains')
-        lines.append(f"- **Definition Pattern:** `{intent['definition_pattern']}` ({pattern_type})")
+    # Display filters (v2 format)
+    filters = intent.get('filters', [])
+    if filters:
+        lines.append(f"\n**Filters ({len(filters)}):**")
+        for i, f in enumerate(filters):
+            filter_desc = format_filter(f)
+            lines.append(f"  {i+1}. {filter_desc}")
+    else:
+        # Legacy fields (backwards compatibility)
+        if intent.get('pos'):
+            lines.append(f"- **Part of Speech:** {intent['pos']}")
 
-    if intent.get('written_form_pattern'):
-        lines.append(f"- **Written Form Pattern:** `{intent['written_form_pattern']}`")
+        if intent.get('gender'):
+            lines.append(f"- **Gender:** {intent['gender']}")
+
+        if intent.get('definition_pattern'):
+            pattern_type = intent.get('pattern_type', 'contains')
+            lines.append(f"- **Definition Pattern:** `{intent['definition_pattern']}` ({pattern_type})")
+
+        if intent.get('written_form_pattern'):
+            lines.append(f"- **Written Form Pattern:** `{intent['written_form_pattern']}`")
 
     # Resources
     resources = intent.get('required_resources', [])
@@ -187,13 +210,67 @@ def format_intent_analysis(result: TranslationResult) -> str:
     if intent.get('reasoning'):
         lines.append(f"\n**LLM Reasoning:**\n> {intent['reasoning']}")
 
-    # Warnings
+    # Warnings (includes filter validation warnings)
     if result.intent_warnings:
-        lines.append(f"\n**Warnings:**")
+        lines.append(f"\n**⚠️ Warnings ({len(result.intent_warnings)}):**")
         for warning in result.intent_warnings:
             lines.append(f"- {warning}")
 
     return "\n".join(lines)
+
+
+def format_filter(f: dict) -> str:
+    """Format a single filter for display."""
+    # Handle SimplifiedFilter format (from LLM)
+    if 'property' in f:
+        prop = f.get('property', '')
+        value = f.get('value', '')
+        if value:
+            result = f"`{prop}` = `{value}`"
+        elif f.get('min_value') is not None or f.get('max_value') is not None:
+            min_v = f.get('min_value')
+            max_v = f.get('max_value')
+            if min_v is not None and max_v is not None:
+                result = f"`{prop}` between {min_v} and {max_v}"
+            elif min_v is not None:
+                result = f"`{prop}` >= {min_v}"
+            else:
+                result = f"`{prop}` <= {max_v}"
+        elif f.get('retrieve'):
+            result = f"retrieve `{prop}`"
+        else:
+            result = f"`{prop}`"
+
+        if f.get('negate'):
+            result = f"NOT ({result})"
+        return result
+
+    # Handle pattern filter
+    if 'pattern' in f:
+        pattern = f.get('pattern', '')
+        pattern_type = f.get('pattern_type', 'regex')
+        target = f.get('target', 'written_rep')
+        result = f"pattern `{pattern}` ({pattern_type}) on {target}"
+        if f.get('negate'):
+            result = f"NOT ({result})"
+        return result
+
+    # Handle FilterSpec format (internal)
+    if 'filter_type' in f:
+        filter_type = f.get('filter_type', '')
+        target_var = f.get('target_variable', '?')
+        value = f.get('value', '')
+        prop_path = f.get('property_path', '')
+
+        if prop_path:
+            return f"`{target_var}` {prop_path} `{value}`"
+        elif value:
+            return f"{filter_type}(`{target_var}`, `{value}`)"
+        else:
+            return f"{filter_type} on `{target_var}`"
+
+    # Fallback: show as JSON
+    return f"`{json.dumps(f)}`"
 
 
 def format_execution_plan(result: TranslationResult) -> str:
