@@ -90,4 +90,6 @@ Thumbs.db
 .env.*.local
 secrets.json
 *_api_key.txt
-.claude/settings.local.json
+
+# Claude Code
+.claude/
