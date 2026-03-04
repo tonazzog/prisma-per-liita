@@ -226,6 +226,8 @@ class CompLitDefinitionSearchPattern(PatternTool):
         - ?wr -> ?lemma (written representation)
         - ?lemma -> ?word (lemma entry)
         """
+        # Skip specs with null/missing target_variable (LLM may produce these)
+        filter_specs = [s for s in filter_specs if s.get("target_variable")]
         filters = []
         # Variable remapping for CompL-it
         var_remap = {
@@ -430,7 +432,8 @@ class CompLitSemanticRelationPattern(PatternTool):
 
     def _build_filters_from_specs(self, filter_specs: List[Dict]) -> List[FilterSpec]:
         """Build FilterSpecs from flexible filter dictionaries"""
-        return [self._filter_builder.from_dict(spec) for spec in filter_specs]
+        # Skip specs with null/missing target_variable (LLM may produce these)
+        return [self._filter_builder.from_dict(spec) for spec in filter_specs if spec.get("target_variable")]
 
     def generate(self, **kwargs) -> PatternFragment:
         lemma = kwargs["lemma"]
@@ -548,30 +551,69 @@ class CompLitWordSenseLookupPattern(PatternTool):
     def get_input_schema(self) -> Dict:
         return {
             "type": "object",
-            "required": ["lemma"],
+            "required": [],
             "properties": {
                 "lemma": {
                     "type": "string",
-                    "description": "The word to look up (written form)"
+                    "description": "Single word to look up (written form). Use lemmas instead for multi-word comparisons."
+                },
+                "lemmas": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of words for multi-word comparison queries (generates regex union filter)"
                 },
                 "pos": {
                     "type": "string",
                     "enum": ["noun", "verb", "adjective", "adverb"],
-                    "description": "Optional part-of-speech filter"
+                    "description": "Optional part-of-speech filter (single-word mode only)"
                 },
                 "retrieve_examples": {
                     "type": "boolean",
                     "default": False,
-                    "description": "Whether to retrieve usage examples"
+                    "description": "Whether to retrieve usage examples (single-word mode only)"
                 }
             }
         }
 
     def generate(self, **kwargs) -> PatternFragment:
-        lemma = kwargs["lemma"]
+        lemma = kwargs.get("lemma")
+        lemmas = kwargs.get("lemmas")
         pos = kwargs.get("pos")
         retrieve_examples = kwargs.get("retrieve_examples", False)
 
+        if lemmas:
+            # Multi-word comparison mode: regex union filter, no definitions needed
+            import re as _re
+            pattern = "|".join(_re.escape(w) for w in lemmas)
+            sparql = f"""
+  SERVICE <https://klab.ilc.cnr.it/graphdb-compl-it/> {{
+    ?lexicalEntry ontolex:canonicalForm [ ontolex:writtenRep ?writtenRep ] .
+    ?lexicalEntry ontolex:sense ?sense .
+    FILTER(regex(str(?writtenRep), "^({pattern})$", "i"))
+  }}"""
+
+            output_vars = [
+                Variable("?writtenRep", VariableType.WRITTEN_REP, "complit",
+                        description="Written form of the word"),
+                Variable("?sense", VariableType.SENSE, "complit",
+                        description="Lexical sense"),
+            ]
+
+            return PatternFragment(
+                pattern_name=self.name,
+                sparql=sparql,
+                input_vars=[],
+                output_vars=output_vars,
+                required_prefixes={"ontolex"},
+                filters_applied=["lemmas_regex"],
+                needs_service_clause=True,
+                metadata={
+                    "query_type": "word_sense_lookup_multi",
+                    "lemmas": lemmas,
+                }
+            )
+
+        # Single-word mode (original behaviour)
         # Build POS clause if specified
         pos_clause = ""
         pos_filter = ""
@@ -1204,6 +1246,8 @@ class SicilianPatternSearchPattern(PatternTool):
         - ?wr -> ?sicilianWR (written representation)
         - ?lemma -> ?sicilianLemma (lemma)
         """
+        # Skip specs with null/missing target_variable (LLM may produce these)
+        filter_specs = [s for s in filter_specs if s.get("target_variable")]
         filters = []
         var_remap = {
             "?wr": "?sicilianWR",
@@ -1451,6 +1495,9 @@ class LiITABasicQueryPattern(PatternTool):
         """Convert filter dictionaries to FilterSpec objects"""
         filters = []
         for spec_dict in filter_dicts:
+            # Skip specs with null/missing target_variable (LLM may produce these)
+            if not spec_dict.get("target_variable"):
+                continue
             filters.append(self._filter_builder.from_dict(spec_dict))
         return filters
 
@@ -1559,12 +1606,22 @@ class AggregationPattern(PatternTool):
             "properties": {
                 "aggregation_type": {
                     "type": "string",
-                    "enum": ["count", "group_concat", "distinct", "avg", "sum", "min", "max"],
+                    "enum": ["count", "group_concat", "distinct", "avg", "sum", "min", "max", "avg_over_count"],
                     "description": "Type of aggregation"
                 },
                 "aggregate_var": {
                     "type": "string",
                     "description": "Variable to aggregate (for COUNT, GROUP_CONCAT)"
+                },
+                "form_var": {
+                    "type": "string",
+                    "default": "wr",
+                    "description": "Variable being counted per group (for avg_over_count)"
+                },
+                "group_var": {
+                    "type": "string",
+                    "default": "lemma",
+                    "description": "Variable to group by / deduplicate (for avg_over_count)"
                 },
                 "group_by_vars": {
                     "type": "array",
@@ -1589,7 +1646,10 @@ class AggregationPattern(PatternTool):
     def generate(self, **kwargs) -> PatternFragment:
         agg_type = kwargs["aggregation_type"]
         aggregate_var = kwargs.get("aggregate_var")
-        group_by_vars = kwargs.get("group_by_vars", [])
+        group_by_vars = kwargs.get("group_by_vars") or []
+        # Normalise: LLM sometimes returns a bare string instead of a list
+        if isinstance(group_by_vars, str):
+            group_by_vars = [group_by_vars]
         separator = kwargs.get("separator", ", ")
         order_by = kwargs.get("order_by")
         
@@ -1612,7 +1672,14 @@ class AggregationPattern(PatternTool):
             group_vars_select = ""
             if group_by_vars:
                 group_vars_select = " ".join([v if v.startswith("?") else "?" + v for v in group_by_vars]) + " "
-            select_clause = f"{group_vars_select}(COUNT(*) as ?count)"
+            # When a specific variable is provided (and not the wildcard "*"),
+            # use COUNT(DISTINCT ?var) to avoid overcounting from OPTIONAL joins
+            # (e.g. OPTIONAL definitions that produce multiple rows per sense/word).
+            if aggregate_var and aggregate_var != "*":
+                agg_var_str = aggregate_var if aggregate_var.startswith("?") else "?" + aggregate_var
+                select_clause = f"{group_vars_select}(COUNT(DISTINCT {agg_var_str}) as ?count)"
+            else:
+                select_clause = f"{group_vars_select}(COUNT(*) as ?count)"
         elif agg_type == "group_concat":
             if aggregate_var and not aggregate_var.startswith("?"):
                 aggregate_var = "?" + aggregate_var
@@ -1629,19 +1696,57 @@ class AggregationPattern(PatternTool):
             agg_func = agg_type.upper()
             result_var = f"?{agg_type}Value"
             select_clause = f"{group_vars_select}({agg_func}({aggregate_var}) as {result_var})"
-        
+        elif agg_type == "avg_over_count":
+            # Computes average number of form_var values per group_var without a nested subquery.
+            # Equivalent to: AVG(COUNT(DISTINCT ?form_var) per ?group_var)
+            # Formula: xsd:float(COUNT(?form_var)) / COUNT(DISTINCT ?group_var)
+            form_var = kwargs.get("form_var", "wr")
+            group_var = kwargs.get("group_var", "lemma")
+            if not form_var.startswith("?"):
+                form_var = "?" + form_var
+            if not group_var.startswith("?"):
+                group_var = "?" + group_var
+            select_clause = f"(xsd:float(COUNT({form_var})) / COUNT(DISTINCT {group_var}) AS ?avgForms)"
+
         group_by_clause = ""
         if group_by_vars:
             vars_str = " ".join([v if v.startswith("?") else "?" + v for v in group_by_vars])
             group_by_clause = f"\nGROUP BY {vars_str}"
         
+        # Determine the canonical aggregate output variable name so ORDER BY can
+        # be corrected when the LLM uses a semantic name that differs from the alias.
+        if agg_type == "count":
+            canonical_agg_var = "?count"
+        elif agg_type in ("avg", "sum", "min", "max"):
+            canonical_agg_var = f"?{agg_type}Value"
+        elif agg_type == "avg_over_count":
+            canonical_agg_var = "?avgForms"
+        elif agg_type == "group_concat":
+            canonical_agg_var = "?aggregated"
+        else:
+            canonical_agg_var = None
+
+        # Normalise group_by_vars to bare names (no leading ?) for membership check
+        group_by_bare = {v.lstrip("?") for v in group_by_vars}
+
         order_by_clause = ""
         if order_by:
-            var = order_by["var"]
-            if not var.startswith("?"):
-                var = "?" + var
-            direction = order_by.get("direction", "ASC")
-            order_by_clause = f"\nORDER BY {direction}({var})"
+            if isinstance(order_by, str):
+                # LLM returned a bare direction string ("ASC"/"DESC") — infer the var
+                direction = order_by.upper() if order_by.upper() in ("ASC", "DESC") else "ASC"
+                order_by_clause = f"\nORDER BY {direction}({canonical_agg_var})"
+            elif isinstance(order_by, dict):
+                var = order_by.get("var", "")
+                if not var.startswith("?"):
+                    var = "?" + var
+                direction = order_by.get("direction", "ASC")
+                # If the LLM's order_by var is not a group-by key and doesn't match
+                # the actual aggregate alias, replace it with the canonical alias.
+                # This prevents QueryBadFormed errors like ORDER BY ?avgPolarityValue
+                # when the SELECT alias is ?avgValue.
+                if canonical_agg_var and var.lstrip("?") not in group_by_bare and var != canonical_agg_var:
+                    var = canonical_agg_var
+                order_by_clause = f"\nORDER BY {direction}({var})"
         
         return PatternFragment(
             pattern_name=self.name,
@@ -1821,6 +1926,8 @@ class ParmigianoPatternSearchPattern(PatternTool):
         - ?wr -> ?parmigianoWR (written representation)
         - ?lemma -> ?parmigianoLemma (lemma)
         """
+        # Skip specs with null/missing target_variable (LLM may produce these)
+        filter_specs = [s for s in filter_specs if s.get("target_variable")]
         filters = []
         var_remap = {
             "?wr": "?parmigianoWR",
@@ -2049,7 +2156,8 @@ class SentixLinkingPattern(PatternTool):
 
     def _build_filters_from_specs(self, filter_specs: List[Dict]) -> List[FilterSpec]:
         """Build FilterSpecs from flexible filter dictionaries"""
-        return [self._filter_builder.from_dict(spec) for spec in filter_specs]
+        # Skip specs with null/missing target_variable (LLM may produce these)
+        return [self._filter_builder.from_dict(spec) for spec in filter_specs if spec.get("target_variable")]
 
     def generate(self, **kwargs) -> PatternFragment:
         liita_var = kwargs["liita_lemma_var"]
@@ -2276,7 +2384,8 @@ class ELItaLinkingPattern(PatternTool):
 
     def _build_filters_from_specs(self, filter_specs: List[Dict]) -> List[FilterSpec]:
         """Build FilterSpecs from flexible filter dictionaries"""
-        return [self._filter_builder.from_dict(spec) for spec in filter_specs]
+        # Skip specs with null/missing target_variable (LLM may produce these)
+        return [self._filter_builder.from_dict(spec) for spec in filter_specs if spec.get("target_variable")]
 
     def generate(self, **kwargs) -> PatternFragment:
         liita_var = kwargs["liita_lemma_var"]
@@ -2291,34 +2400,54 @@ class ELItaLinkingPattern(PatternTool):
         uses_flexible_filters = False
         additional_filter_clauses = ""
 
+        # Emotion IRIs collected from both the legacy emotion_filters param
+        # and any v2 EQUALS filters on ?emotion — all merged into one VALUES clause.
+        emotion_iris = self._resolve_emotion_iris(emotion_filters)
+
         if filter_specs:
-            filters = self._build_filters_from_specs(filter_specs)
-            _, filter_clauses, _ = self._filter_renderer.render(filters)
+            all_filter_specs = self._build_filters_from_specs(filter_specs)
+            uses_flexible_filters = True
+
+            # Separate emotion equality filters from all other filters.
+            # Multiple FILTER(?emotion = X) ... FILTER(?emotion = Y) are ANDed in
+            # SPARQL, which is a contradiction for a single-valued variable.
+            # We intercept them here and fold them into the VALUES clause below
+            # so the result is OR semantics: VALUES ?emotion { X Y }.
+            from .filter_system import FilterType as _FT
+            non_emotion_specs = []
+            for spec in all_filter_specs:
+                if (spec.target_variable == "?emotion"
+                        and spec.filter_type == _FT.EQUALS
+                        and not spec.negate):
+                    iri = spec.value
+                    if iri not in emotion_iris:
+                        emotion_iris.append(iri)
+                else:
+                    non_emotion_specs.append(spec)
+
+            _, filter_clauses, _ = self._filter_renderer.render(non_emotion_specs)
             if filter_clauses:
                 additional_filter_clauses = f"\n  {filter_clauses}"
-            uses_flexible_filters = True
 
         # Build SPARQL pattern
         sparql_parts = []
 
-        # Resolve emotion keywords to ELIta IRIs using EMOTION_MAP
-        emotion_iris = self._resolve_emotion_iris(emotion_filters)
-
-        # If we have emotion IRIs, use VALUES clause (cleaner and more efficient)
+        # If we have emotion IRIs, use VALUES clause (cleaner and correct OR semantics)
         applied_filters = []
         if emotion_iris:
             values_str = " ".join(emotion_iris)
             sparql_parts.append(f"  VALUES ?emotion {{ {values_str} }}")
             applied_filters.append("emotion_type")
 
-        sparql_parts.extend([
-            f"  ?elitaLemma ontolex:canonicalForm {liita_var} .",
-            "  ?elitaLemma elita:HasEmotion ?emotion ."
-        ])
+        sparql_parts.append(f"  ?elitaLemma ontolex:canonicalForm {liita_var} .")
 
-        # Add emotion label retrieval
+        # Scope emotion triples to the ELIta named graph (required for correct counts)
+        graph_inner = ["    ?elitaLemma elita:HasEmotion ?emotion ."]
         if retrieve_emotion_label:
-            sparql_parts.append("  ?emotion rdfs:label ?emotionLabel .")
+            graph_inner.append("    ?emotion rdfs:label ?emotionLabel .")
+        sparql_parts.append("  GRAPH <http://w3id.org/elita> {")
+        sparql_parts.extend(graph_inner)
+        sparql_parts.append("  }")
 
         # Add flexible filter clauses if any
         if additional_filter_clauses:

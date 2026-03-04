@@ -205,6 +205,7 @@ You must output valid JSON with this exact structure:
   "required_resources": ["array of: liita_lemma_bank | complit | parmigiano | sicilian | sentix | elita"],
   "lemma": "specific lemma mentioned (or null)",
   "lemma_b": "second lemma for relation checking queries (or null)",
+  "lemmas": ["array of lemmas for multi-word comparison/ranking queries (or null)"],
   "semantic_relation": "hyponym | hypernym | meronym | holonym | synonym | antonym (or null)",
   "filters": [
     {"property": "pos", "value": "noun"},
@@ -259,6 +260,7 @@ Legacy fields (pos, gender, definition_pattern, pattern_type, written_form_patte
    - Simple listing queries (e.g., "Find hyponyms of X") do NOT need aggregation
 4. **Be conservative with complexity_score** - prefer lower scores
 5. **Include reasoning** - helps debugging
+6. **Use `lemmas` (array) for comparison/ranking queries** - when the query explicitly lists multiple words to compare (e.g., "compare 'banco', 'piano', and 'campo'"), put them ALL in `lemmas` as an array and leave `lemma` null. Use `query_type: "complit_word_sense_lookup"` with `aggregation.type: "count"` and `aggregation.group_by_vars: ["writtenRep"]`.
 
 # EXAMPLES
 
@@ -665,6 +667,33 @@ INTENT_EXAMPLES = [
             "complexity_score": 2,
             "user_query": "What are the meanings of the noun 'piano'?",
             "reasoning": "Word sense lookup with POS filter - retrieve all noun senses and definitions"
+        }
+    },
+    {
+        "query": "Which of the words 'banco', 'piano', and 'campo' has the most distinct meanings in Italian?",
+        "intent": {
+            "query_type": "complit_word_sense_lookup",
+            "required_resources": ["complit"],
+            "lemma": None,
+            "lemmas": ["banco", "piano", "campo"],
+            "pos": None,
+            "definition_pattern": None,
+            "pattern_type": None,
+            "written_form_pattern": None,
+            "semantic_relation": None,
+            "filters": [],
+            "aggregation": {
+                "type": "count",
+                "aggregate_var": "sense",
+                "group_by_vars": ["writtenRep"],
+                "order_by": {"var": "count", "direction": "DESC"}
+            },
+            "retrieve_definitions": False,
+            "retrieve_examples": False,
+            "include_italian_written_rep": False,
+            "complexity_score": 3,
+            "user_query": "Which of the words 'banco', 'piano', and 'campo' has the most distinct meanings in Italian?",
+            "reasoning": "Multi-word comparison: count senses per word, rank by count. Use lemmas array (not lemma) with complit_word_sense_lookup. Group by writtenRep."
         }
     },
     {

@@ -158,6 +158,8 @@ class FilterSpec:
     def __post_init__(self):
         """Validate the filter specification"""
         # Ensure variable starts with ?
+        if self.target_variable is None:
+            raise ValueError("FilterSpec.target_variable cannot be None")
         if not self.target_variable.startswith("?"):
             self.target_variable = "?" + self.target_variable
 

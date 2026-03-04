@@ -71,6 +71,7 @@ class Intent:
     # Search criteria
     lemma: Optional[str] = None
     lemma_b: Optional[str] = None  # Second lemma for relation checking queries
+    lemmas: Optional[List[str]] = None  # Multiple lemmas for comparison/ranking queries
     pos: Optional[str] = None
     definition_pattern: Optional[str] = None
     pattern_type: Optional[str] = None  # starts_with, contains, ends_with, regex
@@ -219,6 +220,16 @@ class PatternOrchestrator:
         if not aggregation:
             return None
 
+        # LLM sometimes returns a plain string (e.g. "count") instead of a dict
+        if isinstance(aggregation, str):
+            return {"aggregation_type": aggregation}
+
+        # LLM sometimes returns a list of aggregation dicts — take the first element
+        if isinstance(aggregation, list):
+            aggregation = aggregation[0] if aggregation else None
+            if not aggregation:
+                return None
+
         # Create a copy to avoid modifying the original
         params = dict(aggregation)
 
@@ -231,6 +242,28 @@ class PatternOrchestrator:
     # ========================================================================
     # Component-Based Planning Helpers
     # ========================================================================
+
+    def _needs_emotion_label(self, intent: Intent) -> bool:
+        """
+        Return True only when the query actually needs ?emotionLabel text.
+
+        The rdfs:label join inside ELItaLinkingPattern multiplies rows when an
+        emotion has more than one label (e.g. multi-language labels), inflating
+        COUNT(*) and distorting AVG values.  We therefore skip it for aggregate
+        queries unless the label is explicitly a GROUP BY key.
+
+        Rules:
+        - No aggregation → listing query, always show the label.
+        - Aggregation present, 'emotionLabel' in group_by_vars → label is a
+          grouping key, include it.
+        - Aggregation present, label not needed → omit to avoid row inflation.
+        """
+        if not intent.aggregation:
+            return True
+        group_by = intent.aggregation.get("group_by_vars") or []
+        if isinstance(group_by, str):
+            group_by = [group_by]
+        return any(v.lstrip("?") == "emotionLabel" for v in group_by)
 
     def _determine_base_component(self, intent: Intent) -> tuple[str, dict, str]:
         """
@@ -374,7 +407,7 @@ class PatternOrchestrator:
         if ResourceType.ELITA in intent.required_resources:
             elita_params = {
                 "liita_lemma_var": lemma_var,
-                "retrieve_emotion_label": True
+                "retrieve_emotion_label": self._needs_emotion_label(intent)
             }
             # Pass filters for ELIta (emotion filters)
             if intent.filters:
@@ -557,11 +590,22 @@ class PatternOrchestrator:
 
         # Step 2: Aggregation if needed
         if intent.aggregation:
+            agg_params = self._transform_aggregation_params(intent.aggregation)
+            # For basic LiITA queries with AVG aggregation, the intent is always
+            # "average number of written forms per lemma". The WHERE clause always
+            # contains both ?lemma and ?wr (from LiITABasicQueryPattern), so we
+            # can compute this as COUNT(?wr) / COUNT(DISTINCT ?lemma) without a
+            # nested subquery — avoiding the "undefined aggregate variable" bug where
+            # the LLM names a variable (e.g. ?writtenFormCount) that never gets bound.
+            if agg_params and agg_params.get("aggregation_type") == "avg":
+                agg_params["aggregation_type"] = "avg_over_count"
+                agg_params["form_var"] = "wr"
+                agg_params["group_var"] = "lemma"
             steps.append(PatternStep(
                 tool_name="aggregation",
-                parameters=self._transform_aggregation_params(intent.aggregation),
+                parameters=agg_params,
                 step_number=step_num,
-                description=f"Apply {intent.aggregation['type']} aggregation",
+                description="Apply aggregation",
                 depends_on=[1]
             ))
 
@@ -636,7 +680,7 @@ class PatternOrchestrator:
                 tool_name="aggregation",
                 parameters=self._transform_aggregation_params(intent.aggregation),
                 step_number=step_num,
-                description=f"Apply {intent.aggregation['type']} aggregation",
+                description="Apply aggregation",
                 depends_on=[i for i in range(1, step_num)]
             ))
         
@@ -667,9 +711,10 @@ class PatternOrchestrator:
         step_num = 1
         
         # Step 1: CompL-it semantic relation (SERVICE)
+        relation_value = intent.semantic_relation.value if intent.semantic_relation else "hypernym"
         service_params = {
             "lemma": intent.lemma,
-            "relation_type": intent.semantic_relation.value,
+            "relation_type": relation_value,
             "pos": intent.pos or "noun",
             "retrieve_definitions": intent.retrieve_definitions
         }
@@ -682,23 +727,28 @@ class PatternOrchestrator:
             tool_name="complit_semantic_relation",
             parameters=service_params,
             step_number=step_num,
-            description=f"Find {intent.semantic_relation.value}s of '{intent.lemma}' in CompL-it",
+            description=f"Find {relation_value}s of '{intent.lemma}' in CompL-it",
         ))
         step_num += 1
         
-        # Step 2: Bridge (ALWAYS needed for semantic queries to get to other resources)
-        # Use relatedWord as the source variable (from semantic pattern)
-        steps.append(PatternStep(
-            tool_name="bridge_complit_to_liita",
-            parameters={"source_var": "?relatedWord"},
-            step_number=step_num,
-            description="Bridge related words to LiITA lemmas",
-            depends_on=[1]
-        ))
-        step_num += 1
-        
-        # Step 3: Italian written representation (if needed)
-        if self.rules.needs_italian_wr(intent):
+        # Step 2: Bridge (only needed when other LiITA resources are required downstream)
+        # Pure CompLit-only semantic queries (no dialect, no LiITA) skip the bridge to
+        # avoid the 2× row duplication caused by each CompLit word having two LiITA
+        # canonicalForm entries.
+        dialect_tools = self.rules.get_dialect_tools(intent)
+        needs_bridge_step = self.rules.needs_bridge(intent)
+        if needs_bridge_step:
+            steps.append(PatternStep(
+                tool_name="bridge_complit_to_liita",
+                parameters={"source_var": "?relatedWord"},
+                step_number=step_num,
+                description="Bridge related words to LiITA lemmas",
+                depends_on=[1]
+            ))
+            step_num += 1
+
+        # Step 3: Italian written representation (only when bridge is present)
+        if needs_bridge_step and self.rules.needs_italian_wr(intent):
             steps.append(PatternStep(
                 tool_name="italian_written_rep",
                 parameters={
@@ -710,9 +760,8 @@ class PatternOrchestrator:
                 depends_on=[2]
             ))
             step_num += 1
-        
+
         # Step 4: Dialect translations (if needed)
-        dialect_tools = self.rules.get_dialect_tools(intent)
         for tool_name in dialect_tools:
             steps.append(PatternStep(
                 tool_name=tool_name,
@@ -729,7 +778,7 @@ class PatternOrchestrator:
                 tool_name="aggregation",
                 parameters=self._transform_aggregation_params(intent.aggregation),
                 step_number=step_num,
-                description=f"Apply {intent.aggregation['type']} aggregation",
+                description="Apply aggregation",
                 depends_on=[i for i in range(1, step_num)]
             ))
         
@@ -739,7 +788,7 @@ class PatternOrchestrator:
             metadata={
                 "plan_type": "complit_semantic",
                 "uses_service": True,
-                "relation_type": intent.semantic_relation.value
+                "relation_type": relation_value
             }
         )
 
@@ -803,28 +852,45 @@ class PatternOrchestrator:
         step_num = 1
 
         # Step 1: CompL-it word sense lookup (SERVICE)
-        params = {
-            "lemma": intent.lemma,
-            "retrieve_examples": intent.retrieve_examples
-        }
-        if intent.pos:
-            params["pos"] = intent.pos
+        # Multi-word comparison mode: pass lemmas list for regex union filter
+        if intent.lemmas:
+            params = {
+                "lemmas": intent.lemmas,
+                "retrieve_examples": False  # definitions not needed for comparison
+            }
+            description = f"Look up senses of {len(intent.lemmas)} words in CompL-it"
+        else:
+            params = {
+                "lemma": intent.lemma,
+                "retrieve_examples": intent.retrieve_examples
+            }
+            if intent.pos:
+                params["pos"] = intent.pos
+            description = f"Look up all senses and definitions of '{intent.lemma}' in CompL-it"
 
         steps.append(PatternStep(
             tool_name="complit_word_sense_lookup",
             parameters=params,
             step_number=step_num,
-            description=f"Look up all senses and definitions of '{intent.lemma}' in CompL-it",
+            description=description,
         ))
         step_num += 1
 
         # Step 2: Aggregation (if needed)
         if intent.aggregation:
+            agg_params = self._transform_aggregation_params(intent.aggregation)
+            if agg_params and agg_params.get("aggregation_type") == "count":
+                # Always deduplicate by sense to prevent OPTIONAL definition inflation.
+                # Use "or" (not setdefault) so an explicit null from the LLM is also overridden.
+                agg_params["aggregate_var"] = agg_params.get("aggregate_var") or "sense"
+                if intent.lemmas:
+                    # Multi-word mode: group by writtenRep (the form variable)
+                    agg_params.setdefault("group_by_vars", ["writtenRep"])
             steps.append(PatternStep(
                 tool_name="aggregation",
-                parameters=self._transform_aggregation_params(intent.aggregation),
+                parameters=agg_params,
                 step_number=step_num,
-                description=f"Apply {intent.aggregation['type']} aggregation",
+                description="Apply aggregation",
                 depends_on=[1]
             ))
 
@@ -902,7 +968,7 @@ class PatternOrchestrator:
                 tool_name="aggregation",
                 parameters=self._transform_aggregation_params(intent.aggregation),
                 step_number=step_num,
-                description=f"Apply {intent.aggregation['type']} aggregation",
+                description="Apply aggregation",
                 depends_on=[i for i in range(1, step_num)]
             ))
         
@@ -987,7 +1053,7 @@ class PatternOrchestrator:
                 tool_name="aggregation",
                 parameters=self._transform_aggregation_params(intent.aggregation),
                 step_number=step_num,
-                description=f"Apply {intent.aggregation['type']} aggregation",
+                description="Apply aggregation",
                 depends_on=[i for i in range(1, step_num)]
             ))
 
@@ -1069,7 +1135,7 @@ class PatternOrchestrator:
                 tool_name="aggregation",
                 parameters=self._transform_aggregation_params(intent.aggregation),
                 step_number=step_num,
-                description=f"Apply {intent.aggregation['type']} aggregation",
+                description="Apply aggregation",
                 depends_on=[i for i in range(1, step_num)]
             ))
         
@@ -1117,7 +1183,7 @@ class PatternOrchestrator:
         # Step 2: ELIta linking
         elita_params = {
             "liita_lemma_var": "?lemma" if intent.lemma or intent.written_form_pattern else "?lemma",
-            "retrieve_emotion_label": True
+            "retrieve_emotion_label": self._needs_emotion_label(intent)
         }
 
         # Pass filters directly (v2 mode)
@@ -1139,7 +1205,7 @@ class PatternOrchestrator:
                 tool_name="aggregation",
                 parameters=self._transform_aggregation_params(intent.aggregation),
                 step_number=step_num,
-                description=f"Apply {intent.aggregation['type']} aggregation",
+                description="Apply aggregation",
                 depends_on=[i for i in range(1, step_num)]
             ))
         
@@ -1177,7 +1243,7 @@ class PatternOrchestrator:
                 tool_name="aggregation",
                 parameters=self._transform_aggregation_params(intent.aggregation),
                 step_number=step_num,
-                description=f"Apply {intent.aggregation['type']} aggregation",
+                description="Apply aggregation",
                 depends_on=[i for i in range(1, step_num)]
             ))
 

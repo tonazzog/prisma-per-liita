@@ -120,6 +120,7 @@ class IntentConverter:
             required_resources=resources,
             lemma=intent_dict.get('lemma'),
             lemma_b=intent_dict.get('lemma_b'),  # For relation checking queries
+            lemmas=intent_dict.get('lemmas') or None,  # Multi-word comparison queries
             pos=pos,
             gender=gender,
             inflection_type=inflection_type,
