@@ -203,7 +203,7 @@ DEFAULT_TARGET_VARIABLES = {
     "sense": "?sense",
     "word": "?word",
     "polarity_value": "?polarityValue",
-    "polarity": "?polarityLabel",
+    "polarity": "?polarity",
     "emotion": "?emotion",
     "emotion_label": "?emotionLabel",
     # Dialect-specific

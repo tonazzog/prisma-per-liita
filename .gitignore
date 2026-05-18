@@ -93,3 +93,4 @@ secrets.json
 
 # Claude Code
 .claude/
+CLAUDE.md

@@ -20,6 +20,19 @@ from .filter_system import FilterSpec, FilterType, FilterRenderer, FilterBuilder
 from .property_registry import PropertyRegistry
 
 
+import re as _re_mod
+
+
+def _regex_filter(var: str, pattern: str, anchor_start: bool = False, anchor_end: bool = False, escape: bool = True) -> str:
+    """Build a FILTER(regex(str(?var), ...)) clause. Uses str() as required by the LiITA Virtuoso endpoint."""
+    p = _re_mod.escape(pattern) if escape else pattern
+    if anchor_start:
+        p = "^" + p
+    if anchor_end:
+        p = p + "$"
+    return f'FILTER(regex(str({var}), "{p}"))'
+
+
 
 
 
@@ -282,10 +295,10 @@ class CompLitDefinitionSearchPattern(PatternTool):
         definition_filter = ""
         if definition_pattern and not uses_flexible_filters:
             filter_map = {
-                "starts_with": f'FILTER(strstarts(str(?definition), "{definition_pattern}"))',
-                "contains": f'FILTER(contains(str(?definition), "{definition_pattern}"))',
-                "ends_with": f'FILTER(strends(str(?definition), "{definition_pattern}"))',
-                "regex": f'FILTER(regex(str(?definition), "{definition_pattern}"))'
+                "starts_with": _regex_filter("?definition", definition_pattern, anchor_start=True),
+                "contains": _regex_filter("?definition", definition_pattern),
+                "ends_with": _regex_filter("?definition", definition_pattern, anchor_end=True),
+                "regex": _regex_filter("?definition", definition_pattern, escape=False),
             }
             definition_filter = filter_map.get(pattern_type, filter_map["starts_with"])
         elif uses_flexible_filters and filter_clauses:
@@ -589,7 +602,7 @@ class CompLitWordSenseLookupPattern(PatternTool):
   SERVICE <https://klab.ilc.cnr.it/graphdb-compl-it/> {{
     ?lexicalEntry ontolex:canonicalForm [ ontolex:writtenRep ?writtenRep ] .
     ?lexicalEntry ontolex:sense ?sense .
-    FILTER(regex(str(?writtenRep), "^({pattern})$", "i"))
+    FILTER(regex(?writtenRep, "^({pattern})$", "i"))
   }}"""
 
             output_vars = [
@@ -1313,10 +1326,10 @@ class SicilianPatternSearchPattern(PatternTool):
             pos_filter = ""
             if pattern:
                 filter_map = {
-                    "regex": f'FILTER(regex(str(?sicilianWR), "{pattern}"))',
-                    "starts_with": f'FILTER(strstarts(str(?sicilianWR), "{pattern}"))',
-                    "ends_with": f'FILTER(strends(str(?sicilianWR), "{pattern}"))',
-                    "contains": f'FILTER(contains(str(?sicilianWR), "{pattern}"))'
+                    "regex": _regex_filter("?sicilianWR", pattern, escape=False),
+                    "starts_with": _regex_filter("?sicilianWR", pattern, anchor_start=True),
+                    "ends_with": _regex_filter("?sicilianWR", pattern, anchor_end=True),
+                    "contains": _regex_filter("?sicilianWR", pattern),
                 }
                 pattern_filter = filter_map.get(pattern_type, filter_map["regex"])
 
@@ -1993,10 +2006,10 @@ class ParmigianoPatternSearchPattern(PatternTool):
             pos_filter = ""
             if pattern:
                 filter_map = {
-                    "regex": f'FILTER(regex(str(?parmigianoWR), "{pattern}"))',
-                    "starts_with": f'FILTER(strstarts(str(?parmigianoWR), "{pattern}"))',
-                    "ends_with": f'FILTER(strends(str(?parmigianoWR), "{pattern}"))',
-                    "contains": f'FILTER(contains(str(?parmigianoWR), "{pattern}"))'
+                    "regex": _regex_filter("?parmigianoWR", pattern, escape=False),
+                    "starts_with": _regex_filter("?parmigianoWR", pattern, anchor_start=True),
+                    "ends_with": _regex_filter("?parmigianoWR", pattern, anchor_end=True),
+                    "contains": _regex_filter("?parmigianoWR", pattern),
                 }
                 pattern_filter = filter_map.get(pattern_type, filter_map["regex"])
 
@@ -2131,12 +2144,12 @@ class SentixLinkingPattern(PatternTool):
 
         polarity_filter = kwargs.get("polarity_filter")
         if polarity_filter:
-            # Polarity type filter on label
+            polarity_local = polarity_filter.capitalize()
             filters.append(
                 FilterSpec(
-                    target_variable="?polarityLabel",
+                    target_variable="?polarity",
                     filter_type=FilterType.EQUALS,
-                    value=f'"{polarity_filter}"@en'
+                    value=f"marl:{polarity_local}"
                 )
             )
 
@@ -2188,7 +2201,6 @@ class SentixLinkingPattern(PatternTool):
         # Add polarity type retrieval
         if retrieve_polarity_type:
             sparql_parts.append("  ?sentixLemma marl:hasPolarity ?polarity .")
-            sparql_parts.append("  ?polarity rdfs:label ?polarityLabel .")
 
         # Add polarity value retrieval
         if retrieve_polarity_value:
@@ -2206,7 +2218,8 @@ class SentixLinkingPattern(PatternTool):
             polarity_value_max = kwargs.get("polarity_value_max")
 
             if polarity_filter:
-                sparql_parts.append(f'  FILTER(?polarityLabel = "{polarity_filter}"@en) .')
+                polarity_local = polarity_filter.capitalize()
+                sparql_parts.append(f"  FILTER(?polarity = marl:{polarity_local}) .")
                 applied_filters.append("polarity_type")
 
             if polarity_value_min is not None:
@@ -2226,12 +2239,10 @@ class SentixLinkingPattern(PatternTool):
         ]
 
         if retrieve_polarity_type:
-            output_vars.extend([
+            output_vars.append(
                 Variable("?polarity", VariableType.WRITTEN_REP, "sentix",
-                        description="Polarity instance"),
-                Variable("?polarityLabel", VariableType.WRITTEN_REP, "sentix",
-                        description="Polarity label (Positive/Negative/Neutral)")
-            ])
+                        description="Polarity URI (marl:Positive / marl:Negative / marl:Neutral)")
+            )
 
         if retrieve_polarity_value:
             output_vars.append(
@@ -2247,7 +2258,7 @@ class SentixLinkingPattern(PatternTool):
                         description="LiITA lemma")
             ],
             output_vars=output_vars,
-            required_prefixes={"ontolex", "marl", "rdfs"},
+            required_prefixes={"ontolex", "marl"},
             filters_applied=applied_filters,
             needs_service_clause=False,
             metadata={

@@ -536,7 +536,7 @@
       "nl_variants": {
         "generated": "Which Parmigiano dialect words correspond to Italian words that carry a negative sentiment?"
       },
-      "sparql": "PREFIX lila: <http://lila-erc.eu/ontologies/lila/>\nPREFIX marl: <http://www.gsi.upm.es/ontologies/marl/ns#>\nPREFIX ontolex: <http://www.w3.org/ns/lemon/ontolex#>\nPREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>\nPREFIX dcterms: <http://purl.org/dc/terms/>\nPREFIX vartrans: <http://www.w3.org/ns/lemon/vartrans#>\n\nSELECT DISTINCT ?italianWord ?parmigianoWord ?polarityValue ?polarityLabel\nWHERE {\n    ?italianLemma a lila:Lemma .\n    ?italianLemma ontolex:writtenRep ?italianWord .\n    ?italianLemma dcterms:isPartOf <http://liita.it/data/id/lemma/LemmaBank> .\n    \n    ?polarityEntry ontolex:canonicalForm ?italianLemma .\n    ?polarityEntry marl:hasPolarity ?polarity .\n    ?polarityEntry marl:hasPolarityValue ?polarityValue .\n    ?polarity rdfs:label ?polarityLabel .\n    \n    FILTER( STR(?polarityLabel) = \"Negative\")\n    \n    ?italianLexEntry ontolex:canonicalForm ?italianLemma .\n    \n    ?italianLexEntry vartrans:translatableAs ?parmigianoLexEntry .\n    ?parmigianoLexEntry ontolex:canonicalForm ?parmigianoLemma .\n    ?parmigianoLemma dcterms:isPartOf <http://liita.it/data/id/DialettoParmigiano/lemma/LemmaBank> .\n    ?parmigianoLemma ontolex:writtenRep ?parmigianoWord .\n}\nORDER BY ASC(?polarityValue)\nLIMIT 50",
+      "sparql": "PREFIX lila: <http://lila-erc.eu/ontologies/lila/>\nPREFIX marl: <http://www.gsi.upm.es/ontologies/marl/ns#>\nPREFIX ontolex: <http://www.w3.org/ns/lemon/ontolex#>\nPREFIX dcterms: <http://purl.org/dc/terms/>\nPREFIX vartrans: <http://www.w3.org/ns/lemon/vartrans#>\n\nSELECT DISTINCT ?italianWord ?parmigianoWord ?polarityValue ?polarity\nWHERE {\n    ?italianLemma a lila:Lemma .\n    ?italianLemma ontolex:writtenRep ?italianWord .\n    ?italianLemma dcterms:isPartOf <http://liita.it/data/id/lemma/LemmaBank> .\n    \n    ?polarityEntry ontolex:canonicalForm ?italianLemma .\n    ?polarityEntry marl:hasPolarity ?polarity .\n    ?polarityEntry marl:hasPolarityValue ?polarityValue .\n    \n    FILTER(?polarity = marl:Negative)\n    \n    ?italianLexEntry ontolex:canonicalForm ?italianLemma .\n    \n    ?italianLexEntry vartrans:translatableAs ?parmigianoLexEntry .\n    ?parmigianoLexEntry ontolex:canonicalForm ?parmigianoLemma .\n    ?parmigianoLemma dcterms:isPartOf <http://liita.it/data/id/DialettoParmigiano/lemma/LemmaBank> .\n    ?parmigianoLemma ontolex:writtenRep ?parmigianoWord .\n}\nORDER BY ASC(?polarityValue)\nLIMIT 50",
       "patterns": [
         "EMOTION_LEXICON",
         "TRANSLATION",
@@ -546,7 +546,7 @@
         "primary": [
           "italianWord",
           "parmigianoWord",
-          "polarityLabel"
+          "polarity"
         ],
         "secondary": [],
         "aggregates": [],

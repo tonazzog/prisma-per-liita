@@ -41,6 +41,8 @@ Example:
     property_patterns, filter_clauses = renderer.render(filters)
 """
 
+import re as _re
+
 from dataclasses import dataclass, field
 from typing import List, Optional, Set, Tuple, Dict, Any
 from enum import Enum
@@ -58,11 +60,11 @@ class FilterType(Enum):
     - PROPERTY_EQUALS: Adds triple pattern with specific value
     - PROPERTY_EQUALS_VAR: Adds triple pattern with variable (for retrieval)
     - EQUALS: FILTER(?var = value)
-    - EQUALS_LITERAL: FILTER(str(?var) = "value")
-    - REGEX: FILTER(regex(str(?var), "pattern"))
-    - STARTS_WITH: FILTER(strstarts(str(?var), "value"))
-    - ENDS_WITH: FILTER(strends(str(?var), "value"))
-    - CONTAINS: FILTER(contains(str(?var), "value"))
+    - EQUALS_LITERAL: FILTER(?var = "value")
+    - REGEX: FILTER(regex(?var, "pattern"))
+    - STARTS_WITH: FILTER(strstarts(?var, "value"))
+    - ENDS_WITH: FILTER(strends(?var, "value"))
+    - CONTAINS: FILTER(contains(?var, "value"))
     - GREATER_THAN: FILTER(?var > value)
     - LESS_THAN: FILTER(?var < value)
     - GREATER_EQUAL: FILTER(?var >= value)
@@ -307,7 +309,8 @@ class FilterRenderer:
             clause = f"FILTER({spec.target_variable} != {spec.value}) ."
             return None, clause
 
-        # String filters
+        # String filters — use regex(str(?var), ...) since strstarts/strends/contains
+        # are restricted on the LiITA Virtuoso endpoint.
         elif spec.filter_type == FilterType.REGEX:
             flags = ', "i"' if spec.case_insensitive else ''
             clause = f'FILTER(regex(str({spec.target_variable}), "{spec.value}"{flags})) .'
@@ -316,32 +319,27 @@ class FilterRenderer:
             return None, clause
 
         elif spec.filter_type == FilterType.STARTS_WITH:
-            func = "strstarts"
-            if spec.case_insensitive:
-                clause = f'FILTER({func}(lcase(str({spec.target_variable})), lcase("{spec.value}"))) .'
-            else:
-                clause = f'FILTER({func}(str({spec.target_variable}), "{spec.value}")) .'
+            escaped = _re.escape(spec.value)
+            flags = ', "i"' if spec.case_insensitive else ''
+            clause = f'FILTER(regex(str({spec.target_variable}), "^{escaped}"{flags})) .'
             if spec.negate:
-                clause = clause.replace("FILTER(", "FILTER(!")
+                clause = f'FILTER(!regex(str({spec.target_variable}), "^{escaped}"{flags})) .'
             return None, clause
 
         elif spec.filter_type == FilterType.ENDS_WITH:
-            func = "strends"
-            if spec.case_insensitive:
-                clause = f'FILTER({func}(lcase(str({spec.target_variable})), lcase("{spec.value}"))) .'
-            else:
-                clause = f'FILTER({func}(str({spec.target_variable}), "{spec.value}")) .'
+            escaped = _re.escape(spec.value)
+            flags = ', "i"' if spec.case_insensitive else ''
+            clause = f'FILTER(regex(str({spec.target_variable}), "{escaped}$"{flags})) .'
             if spec.negate:
-                clause = clause.replace("FILTER(", "FILTER(!")
+                clause = f'FILTER(!regex(str({spec.target_variable}), "{escaped}$"{flags})) .'
             return None, clause
 
         elif spec.filter_type == FilterType.CONTAINS:
-            if spec.case_insensitive:
-                clause = f'FILTER(contains(lcase(str({spec.target_variable})), lcase("{spec.value}"))) .'
-            else:
-                clause = f'FILTER(contains(str({spec.target_variable}), "{spec.value}")) .'
+            escaped = _re.escape(spec.value)
+            flags = ', "i"' if spec.case_insensitive else ''
+            clause = f'FILTER(regex(str({spec.target_variable}), "{escaped}"{flags})) .'
             if spec.negate:
-                clause = clause.replace("FILTER(", "FILTER(!")
+                clause = f'FILTER(!regex(str({spec.target_variable}), "{escaped}"{flags})) .'
             return None, clause
 
         # Numeric comparison filters

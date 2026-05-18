@@ -485,7 +485,7 @@ INTENT_EXAMPLES = [
             "aggregation": {
                 "type": "count",
                 "aggregate_var": None,
-                "group_by_vars": ["polarityLabel"],
+                "group_by_vars": ["polarity"],
                 "separator": None,
                 "order_by": {"var": "count", "direction": "DESC"}
             },

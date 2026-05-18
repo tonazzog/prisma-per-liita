@@ -34,7 +34,7 @@ ANSWER_VARIABLE_CATEGORIES = {
         # PRISMA output variables (user-facing strings)
         "word", "relatedWord", "italianWR", "wr",
         "parmigianoWR", "sicilianWR",
-        "definition", "polarityLabel",
+        "definition", "polarity",
         "relationType", "example", "wordA", "wordB",
         # nl2sparql-style names (gold query variables)
         "italianWord", "sicilianWord", "parmigianoWord",
