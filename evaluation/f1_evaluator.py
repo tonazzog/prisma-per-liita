@@ -1,21 +1,38 @@
-"""F1 Score on Answers evaluator for PRISMA NL2SPARQL system.
+"""Unified F1-on-answers evaluator shared by PRISMA, MoSAIC and NL2SPARQL.
 
 Executes both gold and predicted SPARQL queries against the LiITA endpoint
 and compares their result sets using F1 score (precision/recall on answer tuples).
 
-Ported from nl2sparql/nl2sparql/evaluation/f1_evaluator.py — logic unchanged.
-The only modifications are:
-  - LIITA_ENDPOINT defined locally (removed import from nl2sparql.config)
-  - ANSWER_VARIABLE_CATEGORIES defined locally (removed import from nl2sparql.synthetic)
+One identical copy of this file is used by all three systems (built 2026-11-03
+from mosaic-liita/evaluation/f1_evaluator.py), so that their scores are comparable:
+  - ANSWER_VARIABLE_CATEGORIES is the union of the three former tables
+    (on conflicts the MoSAIC/PRISMA category is kept: polarity -> uris,
+    emotionLabel / lemma / lexicalEntry -> secondary)
+  - variable mapping: name / category / similarity phases as in PRISMA and MoSAIC,
+    plus a final value-based phase: still-unmatched gold primary variables are
+    mapped, in SELECT order, to remaining predicted variables whose values are
+    literals (not IRIs), whatever their name
+  - queries go through GET, falling back to POST when GET fails or the query is
+    too long for a URL (the LiITA proxy rejects some POSTed GROUP_CONCAT queries)
+  - variable names missing from the table that end in Wr / Word / WrittenRep are
+    classified as primary (written forms are user-facing answers)
+  - averages (aggregates named avg* / average* / mean*) match within 1% relative tolerance
+  - F1Evaluator accepts both strip_limit (PRISMA/MoSAIC) and strip_predicted_limit
+    (NL2SPARQL) for the same option
+  - IRI/literal equivalents: when a gold primary answer is an IRI, the gold may name
+    a literal column with the same answer in answer_variables["equivalents"]
+    ({iri_var: literal_var}, e.g. a CompL-it Word IRI and its written form). If the
+    predicted column mapped to iri_var holds literals, it is compared with
+    literal_var instead (gold rows without a literal are then left out), so
+    systems are not penalised for returning words instead of IRIs or vice versa
 
 Usage:
-    from evaluation.f1_evaluator import F1Evaluator
-
     evaluator = F1Evaluator()
     result = evaluator.evaluate_single(gold_sparql, predicted_sparql, answer_vars)
     print(f"F1: {result.f1:.3f}")
 """
 
+import math
 import re
 import warnings
 from collections import Counter
@@ -24,25 +41,36 @@ from typing import Optional
 
 
 # ---------------------------------------------------------------------------
-# Constants (defined locally — no dependency on nl2sparql package)
+# Constants (defined locally — no dependency on external packages)
 # ---------------------------------------------------------------------------
 
 LIITA_ENDPOINT = "https://liita.it/sparql"
 
+# Relative tolerance for averages (gold aggregates named avg*): a slightly
+# different lemma set should not turn a near-identical mean into a miss.
+# Counts and other aggregates still require an exact match.
+AVG_REL_TOLERANCE = 0.01
+
 ANSWER_VARIABLE_CATEGORIES = {
     "primary": [
-        # PRISMA output variables (user-facing strings)
+        # --- Gold query variables (user-facing strings) ---
         "word", "relatedWord", "italianWR", "wr",
         "parmigianoWR", "sicilianWR",
-        "definition", "polarity",
+        "definition", "polarityLabel",
         "relationType", "example", "wordA", "wordB",
-        # nl2sparql-style names (gold query variables)
-        "italianWord", "sicilianWord", "parmigianoWord",
+        "italianWord", "sicilianWord", "parmigianoWord", "dialectWord",
         "hypernymWord", "hyponymWord", "meronymWord",
         "synonymWord", "antonymWord", "translationWord",
+        # --- MoSAIC-specific (after de-aggregation) ---
+        "itLemmaString",      # MoSAIC Italian written rep (CompL-IT path)
+        "sicWR",              # MoSAIC Sicilian written rep (de-aggregated)
+        "parWR",              # MoSAIC Parmigiano written rep (de-aggregated)
+        "definitionSample",   # MoSAIC SAMPLE(definition) — if not de-aggregated
+        "wordRel",            # MoSAIC related word (CompL-IT lexical entry IRI)
+        "writtenRep",         # MoSAIC CompL-IT written rep (sense-count blocks)
     ],
     "secondary": [
-        # Internal join variables (URIs, excluded from comparison)
+        # --- Gold variables ---
         "lemma", "sense", "liitaLemma", "sentixLemma", "elitaLemma",
         "complitWord", "parmigianoLemma", "sicilianLemma",
         "pos", "gender", "senseA", "senseB", "posA", "posB",
@@ -50,15 +78,24 @@ ANSWER_VARIABLE_CATEGORIES = {
         "leSicilianIta", "leSicilianSic",
         "lexEntryLabel", "lexicalEntry", "italianLemma",
         # emotionLabel is classified as secondary so it doesn't displace dialect
-        # variables in position-based matching. Gold test cases that need it
-        # compared list it explicitly in answer_variables.primary, bypassing
-        # this table entirely.
+        # variables in position-based matching.
         "emotionLabel",
+        # --- MoSAIC-specific ---
+        "sicLemma",           # MoSAIC Sicilian lemma IRI
+        "parLemma",           # MoSAIC Parmigiano lemma IRI
+        "senseRel",           # MoSAIC related sense
     ],
     "aggregates": [
         "count", "aggregated", "wordCount",
         "sumValue", "avgValue", "minValue", "maxValue",
         "avgPolarityValue", "avgForms",
+        # --- MoSAIC GROUP_CONCAT aggregates (when not de-aggregated) ---
+        "sicilianoWRs",       # GROUP_CONCAT of Sicilian written reps
+        "parmigianoWRs",      # GROUP_CONCAT of Parmigiano written reps
+        "polarityLabels",     # GROUP_CONCAT of polarity labels
+        "polarityValues",     # GROUP_CONCAT of polarity values
+        "emotions",           # GROUP_CONCAT of emotion labels
+        "variantCount",       # COUNT(wr) > 1 queries
     ],
     "numeric": [
         "polarityValue", "value", "length",
@@ -68,6 +105,18 @@ ANSWER_VARIABLE_CATEGORIES = {
         "emotionLexEntry",
     ],
 }
+
+# Variables added from the PRISMA and NL2SPARQL tables (unified evaluator)
+_UNION_ADDITIONS = {
+    'primary': ['word', 'relatedWord', 'italianWR', 'wr', 'parmigianoWR', 'sicilianWR', 'definition', 'polarityLabel', 'relationType', 'example', 'wordA', 'wordB', 'italianWord', 'sicilianWord', 'parmigianoWord', 'dialectWord', 'hypernymWord', 'hyponymWord', 'meronymWord', 'synonymWord', 'antonymWord', 'translationWord', 'itLemmaString', 'sicWR', 'parWR', 'definitionSample', 'wordRel', 'writtenRep', 'inflectedForm', 'partWord', 'senseDefinition', 'senseLabel', 'wholeWord'],
+    'secondary': ['lemma', 'sense', 'liitaLemma', 'sentixLemma', 'elitaLemma', 'complitWord', 'parmigianoLemma', 'sicilianLemma', 'pos', 'gender', 'senseA', 'senseB', 'posA', 'posB', 'leParmigianoIta', 'leParmigianoSic', 'leSicilianIta', 'leSicilianSic', 'lexEntryLabel', 'lexicalEntry', 'italianLemma', 'emotionLabel', 'sicLemma', 'parLemma', 'senseRel', 'dialectLemma', 'dialectName', 'expressionLabel', 'formType', 'grammaticalInfo', 'hypSense', 'italianGender', 'label', 'morphPattern', 'relatedSense', 'senseLexicon', 'sensePOS', 'sicilianGender'],
+    'aggregates': ['count', 'aggregated', 'wordCount', 'sumValue', 'avgValue', 'minValue', 'maxValue', 'avgPolarityValue', 'avgForms', 'sicilianoWRs', 'parmigianoWRs', 'polarityLabels', 'polarityValues', 'emotions', 'variantCount', 'entries', 'genders', 'lemmaCount', 'linkCount', 'score', 'senseCount'],
+    'numeric': ['polarityValue', 'value', 'length', 'len'],
+    'uris': ['emotion', 'polarity', 'graph', 'form', 'emotionLexEntry', 'cf', 'dialectForm', 'dialectLemmaBank', 'dialectLexEntry', 'emotionResource', 'g', 'italianLexEntry', 'italianLexicalEntry', 'lemmaResource', 'o', 'p', 'parmigianoForm', 'parmigianoLexEntry', 'polarityLexEntry', 's', 'senseMeronym', 'sicilianForm', 'sicilianLexEntry', 'translationEntry', 'wType', 'wordMeronym'],
+}
+for _cat, _names in _UNION_ADDITIONS.items():
+    _known = ANSWER_VARIABLE_CATEGORIES.setdefault(_cat, [])
+    _known.extend(n for n in _names if n not in _known)
 
 
 # ---------------------------------------------------------------------------
@@ -127,16 +176,35 @@ def strip_limit_offset(sparql: str) -> str:
     return sparql.strip()
 
 
+WRITTEN_FORM_SUFFIXES = ("wr", "word", "writtenrep")
+
+MAX_GET_QUERY_CHARS = 6000  # longer queries go straight to POST (URL length limits)
+
+
 def execute_query_full(
     sparql: str,
     endpoint: str = LIITA_ENDPOINT,
     timeout: int = 60,
     max_results: int = 10000,
 ) -> QueryExecutionResult:
-    """Execute a SPARQL query and return the full result set.
+    """Execute a SPARQL query: GET first, POST as fallback (or POST only for long queries)."""
+    methods = ["POST"] if len(sparql) > MAX_GET_QUERY_CHARS else ["GET", "POST"]
+    result = None
+    for method in methods:
+        result = _execute_query_once(sparql, endpoint, timeout, max_results, method)
+        if result.success:
+            return result
+    return result
 
-    Reuses the SPARQLWrapper config pattern from validation/endpoint.py
-    (POST, URLENCODED, JSON, custom Accept header).
+
+def _execute_query_once(
+    sparql: str,
+    endpoint: str = LIITA_ENDPOINT,
+    timeout: int = 60,
+    max_results: int = 10000,
+    method: str = "GET",
+) -> QueryExecutionResult:
+    """Execute a SPARQL query once with the given HTTP method and return the full result set.
 
     Args:
         sparql: SPARQL query string
@@ -148,7 +216,7 @@ def execute_query_full(
         QueryExecutionResult with full result set
     """
     try:
-        from SPARQLWrapper import SPARQLWrapper, JSON, POST, URLENCODED
+        from SPARQLWrapper import SPARQLWrapper, JSON, GET, POST, URLENCODED
     except ImportError:
         return QueryExecutionResult(
             success=False, results=[], result_count=0, variables=[],
@@ -160,8 +228,11 @@ def execute_query_full(
         client.setQuery(sparql)
         client.setReturnFormat(JSON)
         client.setTimeout(timeout)
-        client.setMethod(POST)
-        client.setRequestMethod(URLENCODED)
+        if method == "POST":
+            client.setMethod(POST)
+            client.setRequestMethod(URLENCODED)
+        else:
+            client.setMethod(GET)
         client.addCustomHttpHeader("Accept", "application/sparql-results+json")
 
         with warnings.catch_warnings():
@@ -245,7 +316,6 @@ def normalize_value(value: str, is_numeric: bool = False) -> str:
     if is_numeric and value:
         try:
             num = float(value)
-            # Round to 4 decimal places for numeric comparison
             return str(round(num, 4))
         except ValueError:
             pass
@@ -280,7 +350,7 @@ def _parse_select_variables(sparql: str) -> list[str]:
     # Track inner aggregate variables to exclude
     aggregate_inner = set()
     for pattern in [
-        r'(?:COUNT|SUM|AVG|MIN|MAX)\s*\(\s*\?(\w+)',
+        r'(?:COUNT|SUM|AVG|MIN|MAX)\s*\(\s*(?:DISTINCT\s+)?\?(\w+)',
         r'\(\s*[^)]*\?(\w+)[^)]*\s+AS\s+',
     ]:
         aggregate_inner.update(re.findall(pattern, select_clause, re.IGNORECASE))
@@ -312,16 +382,22 @@ def _classify_variable(var_name: str) -> str:
     for category, names in ANSWER_VARIABLE_CATEGORIES.items():
         if var_name in names:
             return category
+    # Unified evaluator: names not in the table that denote a written form
+    # (e.g. ?partWr, ?floreWord, ?lemmaWrittenRep) are user-facing answers
+    if var_name.lower().endswith(WRITTEN_FORM_SUFFIXES):
+        return "primary"
     return "unknown"
 
 
 def build_variable_mapping(
     gold_answer_vars: dict,
     predicted_sparql: str,
+    predicted_results: Optional[list[dict]] = None,
 ) -> dict[str, str]:
     """Map gold answer variable names to predicted variable names.
 
     Strategy:
+    0. Apply known semantic equivalences (e.g. hyponymWord -> wordRel)
     1. Classify predicted SELECT variables using ANSWER_VARIABLE_CATEGORIES
     2. Match by category: gold primary[i] -> predicted primary[i]
     3. Fallback: direct name match
@@ -348,29 +424,61 @@ def build_variable_mapping(
     mapping: dict[str, str] = {}
     used_predicted: set[str] = set()
 
+    # Phase 0: Apply known semantic equivalences.
+    # Gold queries use descriptive names (hyponymWord, italianWord, etc.) while
+    # MoSAIC uses structural names (wordRel, itLemmaString, etc.).  When both
+    # sides refer to the same SPARQL value type (e.g. CompL-IT Word IRI) we
+    # must map them explicitly to avoid positional mis-matches.
+    _SEMANTIC_EQUIV: dict[str, list[str]] = {
+        # CompL-IT Word IRIs — gold names → preferred MoSAIC name(s)
+        "hyponymWord":  ["wordRel"],
+        "hypernymWord": ["wordRel"],
+        "meronymWord":  ["wordRel"],
+        "synonymWord":  ["wordRel"],
+        "antonymWord":  ["wordRel"],
+        "partWord":     ["wordRel"],
+        # Written representation strings
+        "italianWord":  ["itLemmaString", "wr"],
+        "italianWR":    ["itLemmaString", "wr"],
+        "sicilianWord": ["sicWR"],
+        "parmigianoWord": ["parWR"],
+        "dialectWord":  ["sicWR", "parWR"],
+    }
+
+    pred_set_all = set(predicted_vars)
+    all_gold_flat = []
+    for cat in ["primary", "secondary", "aggregates", "numeric"]:
+        all_gold_flat.extend(gold_answer_vars.get(cat, []))
+
+    for gold_var in all_gold_flat:
+        if gold_var in mapping:
+            continue
+        candidates = _SEMANTIC_EQUIV.get(gold_var, [])
+        for cand in candidates:
+            if cand in pred_set_all and cand not in used_predicted:
+                mapping[gold_var] = cand
+                used_predicted.add(cand)
+                break
+
     # Phase 1: Match by category — same name first, then position
-    # For each gold variable, prefer a predicted variable with the identical name
-    # in the same category over a positional match.  This avoids e.g. mapping
-    # gold ?definition to predicted ?word just because ?word happens to appear
-    # first in the SELECT clause.
-    all_pred_set = set(predicted_vars)  # all predicted vars across all categories
+    all_pred_set = set(predicted_vars)
     for category in ["primary", "secondary", "aggregates", "numeric"]:
         gold_vars = gold_answer_vars.get(category, [])
         pred_vars = pred_by_category.get(category, [])
         pred_set = set(pred_vars)
 
         # First pass: assign same-name matches within this category
-        positional_candidates = []  # gold vars that need further matching
+        positional_candidates = []
         for gold_var in gold_vars:
+            if gold_var in mapping:
+                continue  # already resolved in Phase 0
             if gold_var in pred_set and gold_var not in used_predicted:
                 mapping[gold_var] = gold_var
                 used_predicted.add(gold_var)
             else:
                 positional_candidates.append(gold_var)
 
-        # Phase 1.5: cross-category same-name match for remaining candidates.
-        # A gold primary ?lemma should still match predicted secondary ?lemma
-        # (same-name beat different-category positional match).
+        # Phase 1.5: cross-category same-name match for remaining candidates
         remaining_after_cross = []
         for gold_var in positional_candidates:
             if gold_var in all_pred_set and gold_var not in used_predicted:
@@ -379,11 +487,7 @@ def build_variable_mapping(
             else:
                 remaining_after_cross.append(gold_var)
 
-        # Phase 1.7: within-category substring similarity before positional fallback.
-        # e.g. gold ?sicilianWord should prefer predicted ?sicilianWR over ?polarityLabel
-        # even if polarityLabel appears first in the SELECT clause.
-        # Threshold 6 avoids false positives between "italianWord" and "sicilianWR"
-        # which share the 5-char suffix "lianw" due to both containing "-lian-".
+        # Phase 1.7: within-category substring similarity before positional fallback
         remaining_pred = [v for v in pred_vars if v not in used_predicted]
         remaining_after_sim: list[str] = []
         used_in_sim: set[str] = set()
@@ -442,7 +546,6 @@ def build_variable_mapping(
 
         for pred_var in available_pred:
             pred_lower = pred_var.lower()
-            # Check shared substrings (minimum length 3)
             score = 0
             for length in range(3, min(len(gold_lower), len(pred_lower)) + 1):
                 for start in range(len(gold_lower) - length + 1):
@@ -459,7 +562,45 @@ def build_variable_mapping(
             used_predicted.add(best_match)
             available_pred.remove(best_match)
 
+    # Phase 4 (unified evaluator): value-based fallback. Names are not reliable
+    # across systems (e.g. ?lemma holds a written form in some queries and a
+    # lemma IRI in others), so still-unmatched gold primary variables are mapped,
+    # in SELECT order, to remaining predicted variables whose values are literals.
+    if predicted_results:
+        unmatched_primary = [v for v in gold_answer_vars.get("primary", []) if v not in mapping]
+        literal_pred = [
+            v for v in predicted_vars
+            if v not in used_predicted and _is_literal_column(predicted_results, v)
+        ]
+        for gold_var, pred_var in zip(unmatched_primary, literal_pred):
+            mapping[gold_var] = pred_var
+            used_predicted.add(pred_var)
+
     return mapping
+
+
+def _column_kind(rows: list[dict], var: str, sample: int = 50) -> Optional[str]:
+    """'iri' if the bound values of var (in a sample of rows) are all IRIs, 'literal' otherwise, None if unbound."""
+    values = [r[var] for r in rows[:sample] if r.get(var)]
+    if not values:
+        return None
+    return "iri" if all(v.startswith(("http://", "https://", "urn:", "_:")) for v in values) else "literal"
+
+
+def _is_literal_column(rows: list[dict], var: str, sample: int = 50) -> bool:
+    """True if the bound values of var (in a sample of rows) are non-IRI, non-numeric literals."""
+    values = [r[var] for r in rows[:sample] if r.get(var)]
+    if not values:
+        return False
+    for v in values:
+        if v.startswith(("http://", "https://", "urn:", "_:")):
+            return False
+        try:
+            float(v)
+            return False
+        except ValueError:
+            pass
+    return True
 
 
 def compute_f1(
@@ -470,9 +611,6 @@ def compute_f1(
     numeric_vars: Optional[set[str]] = None,
 ) -> F1Result:
     """Compute F1 score between gold and predicted result sets.
-
-    Uses multiset (Counter) comparison on answer tuples for primary+secondary
-    variables, and exact/numeric match for aggregates.
 
     Args:
         gold_results: Gold standard result rows
@@ -487,21 +625,25 @@ def compute_f1(
     if numeric_vars is None:
         numeric_vars = set(answer_vars.get("numeric", []))
 
-    # Determine which variables to use for tuple comparison.
-    # Only primary variables (user-facing answer strings/values) are used.
-    # Secondary variables are internal URI identifiers — different valid query
-    # paths can arrive at different URIs for semantically identical answers, and
-    # predicted queries may legitimately omit them from SELECT.
     tuple_vars = answer_vars.get("primary", [])
     aggregate_vars = answer_vars.get("aggregates", [])
 
-    # --- Tuple-based F1 for primary + secondary variables ---
+    # IRI/literal equivalents: compare a literal prediction with the gold's literal column
+    gold_cols = list(tuple_vars)
+    required_gold_cols = []
+    for k, var in enumerate(tuple_vars):
+        alt = answer_vars.get("equivalents", {}).get(var)
+        if alt and _column_kind(predicted_results, variable_mapping.get(var, var)) == "literal":
+            gold_cols[k] = alt
+            required_gold_cols.append(alt)
+    if required_gold_cols:
+        gold_results = [r for r in gold_results if all(r.get(c) for c in required_gold_cols)]
+
     def extract_tuple(row: dict, var_list: list[str], var_map: dict, is_gold: bool) -> tuple:
-        """Extract a comparable tuple from a result row."""
         values = []
-        for var in var_list:
+        for k, var in enumerate(var_list):
             if is_gold:
-                raw = row.get(var, "")
+                raw = row.get(gold_cols[k], "")
             else:
                 mapped = var_map.get(var, var)
                 raw = row.get(mapped, "")
@@ -519,7 +661,6 @@ def compute_f1(
             for row in predicted_results
         )
 
-        # Multiset intersection: TP = sum of min counts
         true_positives = 0
         for t in gold_tuples:
             if t in pred_tuples:
@@ -528,17 +669,14 @@ def compute_f1(
         total_gold = sum(gold_tuples.values())
         total_predicted = sum(pred_tuples.values())
     else:
-        # No tuple variables — use row count comparison
         true_positives = min(len(gold_results), len(predicted_results))
         total_gold = len(gold_results)
         total_predicted = len(predicted_results)
 
-    # Precision / Recall
     precision = true_positives / total_predicted if total_predicted > 0 else 0.0
     recall = true_positives / total_gold if total_gold > 0 else 0.0
     f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
 
-    # --- Aggregate comparison ---
     aggregate_score = None
     aggregate_details: dict = {}
 
@@ -554,6 +692,11 @@ def compute_f1(
             pred_val = normalize_value(pred_row.get(pred_mapped, ""), is_numeric=True)
 
             is_match = gold_val == pred_val
+            if not is_match and agg_var.lower().startswith(("avg", "average", "mean")):
+                try:
+                    is_match = math.isclose(float(gold_val), float(pred_val), rel_tol=AVG_REL_TOLERANCE)
+                except ValueError:
+                    pass
             aggregate_details[agg_var] = {
                 "gold": gold_val,
                 "predicted": pred_val,
@@ -564,7 +707,6 @@ def compute_f1(
 
         aggregate_score = matches / total_aggs if total_aggs > 0 else None
 
-        # For aggregate-only queries (no tuple vars), use aggregate score as F1
         if not tuple_vars and aggregate_score is not None:
             f1 = aggregate_score
             precision = aggregate_score
@@ -613,7 +755,10 @@ class F1Evaluator:
         max_results: int = 10000,
         cache_gold_results: bool = True,
         strip_limit: bool = True,
+        strip_predicted_limit: Optional[bool] = None,  # NL2SPARQL's name for strip_limit
     ):
+        if strip_predicted_limit is not None:
+            strip_limit = strip_predicted_limit
         self.endpoint = endpoint
         self.timeout = timeout
         self.max_results = max_results
@@ -639,12 +784,10 @@ class F1Evaluator:
         Returns:
             F1Result with scores and details
         """
-        # Optionally strip LIMIT/OFFSET from both queries before execution
         if self.strip_limit:
             gold_sparql = strip_limit_offset(gold_sparql)
             predicted_sparql = strip_limit_offset(predicted_sparql)
 
-        # Execute gold query (use cache if available)
         if self.cache_gold_results and test_id in self._gold_cache:
             gold_exec = self._gold_cache[test_id]
         else:
@@ -654,7 +797,6 @@ class F1Evaluator:
             if self.cache_gold_results:
                 self._gold_cache[test_id] = gold_exec
 
-        # Gold query failed — skip
         if not gold_exec.success:
             return F1Result(
                 test_id=test_id,
@@ -663,12 +805,10 @@ class F1Evaluator:
                 gold_error=gold_exec.error,
             )
 
-        # Execute predicted query
         pred_exec = execute_query_full(
             predicted_sparql, self.endpoint, self.timeout, self.max_results,
         )
 
-        # Predicted query failed — F1 = 0
         if not pred_exec.success:
             return F1Result(
                 test_id=test_id,
@@ -678,7 +818,6 @@ class F1Evaluator:
                 predicted_error=pred_exec.error,
             )
 
-        # Both empty — perfect match
         if gold_exec.result_count == 0 and pred_exec.result_count == 0:
             return F1Result(
                 test_id=test_id,
@@ -686,10 +825,8 @@ class F1Evaluator:
                 gold_count=0, predicted_count=0, true_positives=0,
             )
 
-        # Build variable mapping
-        var_mapping = build_variable_mapping(answer_variables, predicted_sparql)
+        var_mapping = build_variable_mapping(answer_variables, predicted_sparql, pred_exec.results)
 
-        # Compute F1
         numeric_vars = set(answer_variables.get("numeric", []))
         numeric_vars.update(answer_variables.get("aggregates", []))
 
@@ -701,7 +838,6 @@ class F1Evaluator:
             numeric_vars=numeric_vars,
         )
 
-        # Set test_id on result
         result.test_id = test_id
         return result
 
@@ -713,9 +849,6 @@ class F1Evaluator:
     ) -> F1Report:
         """Evaluate a full test dataset.
 
-        For each test case, translates the NL question (if translator provided)
-        or uses the gold query as prediction (for baseline testing).
-
         Args:
             test_data: Loaded test dataset dict with "test_cases" key
             translator: Optional translator with translate() method
@@ -726,7 +859,6 @@ class F1Evaluator:
         """
         test_cases = test_data["test_cases"]
 
-        # Pre-fetch gold results if caching enabled
         if self.cache_gold_results:
             self.prefetch_gold_results(test_data)
 
@@ -744,7 +876,6 @@ class F1Evaluator:
                 skipped += 1
                 continue
 
-            # Get predicted SPARQL
             if translator is not None:
                 question = tc.get(f"nl_{language}", tc.get("nl_en", ""))
                 try:
@@ -759,7 +890,6 @@ class F1Evaluator:
                     ))
                     continue
             else:
-                # Baseline: use gold query as prediction
                 predicted_sparql = gold_sparql
 
             if not predicted_sparql:
@@ -771,7 +901,6 @@ class F1Evaluator:
                 ))
                 continue
 
-            # Strip LIMIT/OFFSET before storing (evaluate_single does it internally too)
             stored_sparql = strip_limit_offset(predicted_sparql) if self.strip_limit else predicted_sparql
 
             f1_result = self.evaluate_single(
@@ -779,22 +908,18 @@ class F1Evaluator:
             )
             f1_result.predicted_sparql = stored_sparql
 
-            # Skip test cases where gold query failed
             if f1_result.gold_error:
                 skipped += 1
                 continue
 
             results.append(f1_result)
 
-            # Track by category
             category = tc.get("category", "unknown")
             f1_by_category.setdefault(category, []).append(f1_result.f1)
 
-            # Track by pattern
             for pattern in tc.get("patterns", []):
                 f1_by_pattern.setdefault(pattern, []).append(f1_result.f1)
 
-        # Compute aggregate metrics
         evaluated = len(results)
         if evaluated > 0:
             avg_precision = sum(r.precision for r in results) / evaluated
@@ -803,7 +928,6 @@ class F1Evaluator:
         else:
             avg_precision = avg_recall = avg_f1 = 0.0
 
-        # Macro F1: average of per-category F1 averages
         cat_avgs = []
         cat_report = {}
         for cat, scores in f1_by_category.items():
@@ -862,18 +986,7 @@ class F1Evaluator:
 # ---------------------------------------------------------------------------
 
 def save_f1_report(report: F1Report, path: str) -> None:
-    """Save an F1Report to a JSON file, including all generated SPARQL queries.
-
-    The output file contains:
-      - summary: aggregate metrics (avg precision, recall, f1, macro f1)
-      - by_category / by_pattern: per-group averages and counts
-      - results: one entry per evaluated test case, including:
-          - predicted_sparql: the SPARQL generated by the model
-          - precision / recall / f1
-          - gold_count / predicted_count / true_positives
-          - aggregate_score and aggregate_details (for COUNT queries)
-          - variable_mapping: how gold variables were matched to predicted ones
-          - gold_error / predicted_error: execution errors if any
+    """Save an F1Report to a JSON file.
 
     Args:
         report: F1Report returned by F1Evaluator.evaluate_dataset()
