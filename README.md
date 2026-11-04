@@ -91,7 +91,7 @@ print(f"Steps: {result.total_steps}")
 python -m app.gradio_app
 
 # Run with specific provider
-python -m app.gradio_app --provider anthropic --model claude-sonnet-4-20250514
+python -m app.gradio_app --provider anthropic --model claude-sonnet-4-6
 
 # Create a public link
 python -m app.gradio_app --share
@@ -126,10 +126,10 @@ export GOOGLE_API_KEY="your-key"
 
 | Provider | Default Model | Package |
 |----------|---------------|---------|
-| Mistral | `mistral-large-latest` | `mistralai` |
-| Anthropic | `claude-sonnet-4-20250514` | `anthropic` |
-| OpenAI | `gpt-4o` | `openai` |
-| Gemini | `gemini-1.5-pro` | `google-generativeai` |
+| Mistral | `mistral-large-4-0` | `mistralai` |
+| Anthropic | `claude-sonnet-4-6` | `anthropic` |
+| OpenAI | `gpt-6.1-terra` | `openai` |
+| Gemini | `gemini-3.6-flash` | `google-generativeai` |
 | Ollama | `llama3.1` | `ollama` |
 
 ## Project Structure
@@ -284,12 +284,12 @@ python scripts/run_f1_evaluation.py \
 # OpenAI
 python scripts/run_f1_evaluation.py \
     --provider openai \
-    --model gpt-4.1-mini
+    --model gpt-6.1-terra
 
 # Local model via Ollama (no rate limiting needed)
 python scripts/run_f1_evaluation.py \
     --provider ollama \
-    --model llama3.2
+    --model llama3.1
 ```
 
 The API key is read from the corresponding environment variable (`ANTHROPIC_API_KEY`, `MISTRAL_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`) or passed explicitly with `--api-key`.

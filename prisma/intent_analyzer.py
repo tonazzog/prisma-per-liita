@@ -1033,7 +1033,7 @@ class IntentAnalyzer:
         client = create_llm_client(
             provider="anthropic",
             api_key="your-api-key",
-            model="claude-sonnet-4-20250514"
+            model="claude-sonnet-4-6"
         )
 
         # Create the analyzer

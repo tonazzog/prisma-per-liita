@@ -10,8 +10,8 @@ Now uses prisma with the flexible filter system.
 
 Usage:
     python -m app.gradio_app
-    python -m app.gradio_app --provider anthropic --model claude-sonnet-4-20250514
-    python -m app.gradio_app --provider ollama --model llama3 --share
+    python -m app.gradio_app --provider anthropic --model claude-sonnet-4-6
+    python -m app.gradio_app --provider ollama --model llama3.1 --share
 """
 
 import argparse
@@ -595,7 +595,7 @@ LIMIT 10""",
                     )
                     model_input = gr.Textbox(
                         label="Model (optional, uses default if empty)",
-                        placeholder="e.g., claude-sonnet-4-20250514, gpt-4o, mistral-large-latest",
+                        placeholder="e.g., claude-sonnet-4-6, gpt-6.1-terra, mistral-large-4-0",
                     )
 
                 api_key_input = gr.Textbox(
@@ -617,10 +617,10 @@ LIMIT 10""",
                 ---
 
                 **Default Models:**
-                - Mistral: `mistral-large-latest`
-                - Anthropic: `claude-sonnet-4-20250514`
-                - OpenAI: `gpt-4o`
-                - Gemini: `gemini-1.5-pro`
+                - Mistral: `mistral-large-4-0`
+                - Anthropic: `claude-sonnet-4-6`
+                - OpenAI: `gpt-6.1-terra`
+                - Gemini: `gemini-3.6-flash`
                 - Ollama: `llama3.1`
 
                 **Environment Variables:**
