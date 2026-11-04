@@ -16,21 +16,31 @@ from enum import Enum
 from abc import ABC, abstractmethod
 
 # Import filter system for flexible filtering
-from .filter_system import FilterSpec, FilterType, FilterRenderer, FilterBuilder
+from .filter_system import (
+    FilterSpec, FilterType, FilterRenderer, FilterBuilder,
+    regex_flags, regex_literal, sparql_string_escape, strip_affix_hyphens,
+)
 from .property_registry import PropertyRegistry
 
 
-import re as _re_mod
-
-
 def _regex_filter(var: str, pattern: str, anchor_start: bool = False, anchor_end: bool = False, escape: bool = True) -> str:
-    """Build a FILTER(regex(str(?var), ...)) clause. Uses str() as required by the LiITA Virtuoso endpoint."""
-    p = _re_mod.escape(pattern) if escape else pattern
+    """Build a FILTER(regex(str(?var), ...)) clause. Uses str() as required by the LiITA Virtuoso endpoint.
+
+    The value is escaped for the regex and then for the SPARQL string, and the
+    flags argument is always given (a two-argument regex inside a SERVICE block
+    is refused by Virtuoso); see filter_system.regex_literal / regex_flags.
+    """
+    if escape:
+        if anchor_start or anchor_end:
+            pattern = strip_affix_hyphens(pattern)
+        p = regex_literal(pattern)
+    else:
+        p = sparql_string_escape(pattern)
     if anchor_start:
         p = "^" + p
     if anchor_end:
         p = p + "$"
-    return f'FILTER(regex(str({var}), "{p}"))'
+    return f'FILTER(regex(str({var}), "{p}"{regex_flags(False)}))'
 
 
 
@@ -596,8 +606,7 @@ class CompLitWordSenseLookupPattern(PatternTool):
 
         if lemmas:
             # Multi-word comparison mode: regex union filter, no definitions needed
-            import re as _re
-            pattern = "|".join(_re.escape(w) for w in lemmas)
+            pattern = "|".join(regex_literal(w) for w in lemmas)
             sparql = f"""
   SERVICE <https://klab.ilc.cnr.it/graphdb-compl-it/> {{
     ?lexicalEntry ontolex:canonicalForm [ ontolex:writtenRep ?writtenRep ] .

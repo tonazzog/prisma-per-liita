@@ -49,6 +49,41 @@ from enum import Enum
 
 
 # ============================================================================
+# String escaping for regex filters
+# ============================================================================
+
+_REGEX_META = set(r"\.^$*+?{}[]|()")
+
+
+def sparql_string_escape(text: str) -> str:
+    """Escape text for a double-quoted SPARQL string literal (backslash, quote)."""
+    return text.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def regex_literal(text: str) -> str:
+    """Match `text` literally inside a regex in a SPARQL string.
+
+    Two passes: regex metacharacters are escaped first, then the result is
+    escaped for the SPARQL string, so `a.b` becomes "a\\\\.b". Python's
+    re.escape is not used: it also escapes characters such as '-', and a
+    single backslash before them is an invalid SPARQL escape (Virtuoso SP030).
+    """
+    escaped = "".join(f"\\{c}" if c in _REGEX_META else c for c in text)
+    return sparql_string_escape(escaped)
+
+
+def strip_affix_hyphens(text: str) -> str:
+    """'dis-' -> 'dis', '-zione' -> 'zione' (linguistic notation for affixes)."""
+    stripped = text.strip().strip("-–‑").strip()
+    return stripped or text
+
+
+def regex_flags(case_insensitive: bool) -> str:
+    """Third regex() argument; always present (see FilterRenderer string filters)."""
+    return ', "i"' if case_insensitive else ', ""'
+
+
+# ============================================================================
 # Filter Types
 # ============================================================================
 
@@ -310,33 +345,36 @@ class FilterRenderer:
             return None, clause
 
         # String filters — use regex(str(?var), ...) since strstarts/strends/contains
-        # are restricted on the LiITA Virtuoso endpoint.
+        # are restricted on the LiITA Virtuoso endpoint. The flags argument is
+        # always present: inside a SERVICE block Virtuoso refuses a two-argument
+        # regex (SR186 SPARQL_SD_PROBE), while "" (= no flags) is accepted.
         elif spec.filter_type == FilterType.REGEX:
-            flags = ', "i"' if spec.case_insensitive else ''
-            clause = f'FILTER(regex(str({spec.target_variable}), "{spec.value}"{flags})) .'
+            flags = regex_flags(spec.case_insensitive)
+            pattern = sparql_string_escape(spec.value)
+            clause = f'FILTER(regex(str({spec.target_variable}), "{pattern}"{flags})) .'
             if spec.negate:
-                clause = f'FILTER(!regex(str({spec.target_variable}), "{spec.value}"{flags})) .'
+                clause = f'FILTER(!regex(str({spec.target_variable}), "{pattern}"{flags})) .'
             return None, clause
 
         elif spec.filter_type == FilterType.STARTS_WITH:
-            escaped = _re.escape(spec.value)
-            flags = ', "i"' if spec.case_insensitive else ''
+            escaped = regex_literal(strip_affix_hyphens(spec.value))
+            flags = regex_flags(spec.case_insensitive)
             clause = f'FILTER(regex(str({spec.target_variable}), "^{escaped}"{flags})) .'
             if spec.negate:
                 clause = f'FILTER(!regex(str({spec.target_variable}), "^{escaped}"{flags})) .'
             return None, clause
 
         elif spec.filter_type == FilterType.ENDS_WITH:
-            escaped = _re.escape(spec.value)
-            flags = ', "i"' if spec.case_insensitive else ''
+            escaped = regex_literal(strip_affix_hyphens(spec.value))
+            flags = regex_flags(spec.case_insensitive)
             clause = f'FILTER(regex(str({spec.target_variable}), "{escaped}$"{flags})) .'
             if spec.negate:
                 clause = f'FILTER(!regex(str({spec.target_variable}), "{escaped}$"{flags})) .'
             return None, clause
 
         elif spec.filter_type == FilterType.CONTAINS:
-            escaped = _re.escape(spec.value)
-            flags = ', "i"' if spec.case_insensitive else ''
+            escaped = regex_literal(spec.value)
+            flags = regex_flags(spec.case_insensitive)
             clause = f'FILTER(regex(str({spec.target_variable}), "{escaped}"{flags})) .'
             if spec.negate:
                 clause = f'FILTER(!regex(str({spec.target_variable}), "{escaped}"{flags})) .'
@@ -416,7 +454,7 @@ class FilterBuilder:
             retrieve: If True, also retrieve the POS value
         """
         # Normalize POS value
-        if not pos.startswith(self.LILA_PREFIX):
+        if pos and not pos.startswith(self.LILA_PREFIX):
             pos = f"{self.LILA_PREFIX}{pos}"
 
         if retrieve:
@@ -448,7 +486,7 @@ class FilterBuilder:
             gender: The gender value (e.g., "masculine", "feminine")
             retrieve: If True, also retrieve the gender value
         """
-        if not gender.startswith(self.LILA_PREFIX):
+        if gender and not gender.startswith(self.LILA_PREFIX):
             gender = f"{self.LILA_PREFIX}{gender}"
 
         if retrieve:
@@ -475,7 +513,7 @@ class FilterBuilder:
         """
         Create an inflection type filter.
         """
-        if not inflection_type.startswith(self.LILA_PREFIX):
+        if inflection_type and not inflection_type.startswith(self.LILA_PREFIX):
             inflection_type = f"{self.LILA_PREFIX}{inflection_type}"
 
         if retrieve:
@@ -608,7 +646,7 @@ class FilterBuilder:
             polarity: The polarity value ("Positive", "Negative", "Neutral")
             retrieve: If True, retrieve the polarity value
         """
-        if not polarity.startswith(self.MARL_PREFIX):
+        if polarity and not polarity.startswith(self.MARL_PREFIX):
             polarity = f"{self.MARL_PREFIX}{polarity}"
 
         if retrieve:
@@ -683,7 +721,7 @@ class FilterBuilder:
             emotion: The emotion value (e.g., "Gioia", "Tristezza")
             retrieve: If True, retrieve the emotion value
         """
-        if not emotion.startswith(self.ELITA_PREFIX):
+        if emotion and not emotion.startswith(self.ELITA_PREFIX):
             emotion = f"{self.ELITA_PREFIX}{emotion}"
 
         if retrieve:
