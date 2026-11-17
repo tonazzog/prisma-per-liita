@@ -37,10 +37,20 @@ Natural Language Query
 ## Features
 
 - **Transparent Pipeline**: See exactly how each query is processed
-- **Multi-Provider LLM Support**: Mistral, Anthropic, OpenAI, Gemini, Ollama
+- **Multi-Provider LLM Support**: Mistral, Anthropic, OpenAI, Gemini, Ollama, Claude Code (local CLI, no API key)
 - **Pattern-Based Generation**: Guaranteed structural correctness
 - **Multiple Resources**: CompL-it, Sentix, ELIta, Parmigiano, Sicilian dialects
 - **Web Interface**: User-friendly Gradio UI
+
+## Thesis Version and Related Systems
+
+PRISMA is one of three NL-to-SPARQL systems for LiITA developed for the master's thesis *Querying LiITA in Natural Language: Three Neuro-Symbolic Approaches to NL-to-SPARQL Translation*:
+
+- **PRISMA** (this repository) — the LLM classifies the intent, SPARQL is assembled by rules;
+- [MoSAIC](https://github.com/tonazzog/mosaic-liita) — the LLM composes typed blocks, SPARQL is assembled deterministically;
+- [NL2SPARQL](https://github.com/tonazzog/nl2sparql) — the LLM generates SPARQL, grounded by retrieved examples and constraints.
+
+The version evaluated in the thesis is tagged **`thesis-final-2026-11-15`**. PRISMA was not revised during the final phase of the thesis and serves as a baseline: its intent schema handles conjunctions of constraints well, but cannot express negation, union, intersection or comparisons (thesis, Chapters 5 and 6).
 
 ## Installation
 
@@ -131,6 +141,7 @@ export GOOGLE_API_KEY="your-key"
 | OpenAI | `gpt-6.1-terra` | `openai` |
 | Gemini | `gemini-3.6-flash` | `google-generativeai` |
 | Ollama | `llama3.1` | `ollama` |
+| Claude Code | `claude-sonnet-4-6` | none (local, logged-in [Claude Code](https://docs.claude.com/en/docs/claude-code) CLI; no API key) |
 
 ## Project Structure
 
@@ -240,20 +251,13 @@ String-level comparison of SPARQL queries is too strict for evaluating NL2SPARQL
 
 F1 on answer sets sidesteps all of these issues by measuring what actually matters: **whether the system returns the right answers**, regardless of how the query is written.
 
-#### Variable mapping
+#### The evaluator
 
-PRISMA's predicted queries sometimes use different variable names than the gold queries (e.g. `?italianWord` vs `?italianWR`). The evaluator resolves this automatically through a four-phase matching strategy:
-
-1. Exact name match within the same variable category (primary, aggregate, numeric)
-2. Exact name match across categories
-3. Longest common substring (threshold: 6 characters) — catches systematic renames
-4. Positional fallback within category
-
-Only **primary variables** (user-facing answer strings) are compared. Internal join variables (URIs, intermediate lemma nodes) are excluded.
+The evaluator (`evaluation/f1_evaluator.py`) is the one used in the thesis; an identical copy is used by PRISMA, MoSAIC and NL2SPARQL, so that their scores are comparable. Columns are matched **by value**: each gold answer column is matched to the predicted column whose values overlap most with it, so that different variable names do not matter; name-based matching is used only as a fallback. `LIMIT`/`OFFSET` are removed from both queries, a gold column that only repeats the seed word of the question (an *echo* column) is not required, and IRI and literal answers are accepted when the gold names both. Only the answer columns are compared; internal join variables are excluded.
 
 ### Test Dataset
 
-The test set consists of **100 annotated questions** covering the full range of query patterns supported by PRISMA:
+`data/test_dataset.json` contains **100 annotated questions**. It is the test set of the first evaluation, used in the thesis as a **regression set**; the final evaluation used a separate test set of 86 questions, frozen before the systems were revised (thesis, Chapter 6).
 
 | Category | Count | Examples |
 |---|---|---|
