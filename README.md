@@ -50,7 +50,7 @@ PRISMA is one of three NL-to-SPARQL systems for LiITA developed for the master's
 - [MoSAIC](https://github.com/tonazzog/mosaic-liita) — the LLM composes typed blocks, SPARQL is assembled deterministically;
 - [NL2SPARQL](https://github.com/tonazzog/nl2sparql) — the LLM generates SPARQL, grounded by retrieved examples and constraints.
 
-The version evaluated in the thesis is tagged **`thesis-final-2026-11-15`**. PRISMA was not revised during the final phase of the thesis and serves as a baseline: its intent schema handles conjunctions of constraints well, but cannot express negation, union, intersection or comparisons (thesis, Chapters 5 and 6).
+The version evaluated in the thesis is tagged **`thesis-final-2026-11-15`**. The evaluation material (question sets, reports, analysis) is in [liita-nl2sparql-evaluation](https://github.com/tonazzog/liita-nl2sparql-evaluation). PRISMA was not revised during the final phase of the thesis and serves as a baseline: its intent schema handles conjunctions of constraints well, but cannot express negation, union, intersection or comparisons (thesis, Chapters 5 and 6).
 
 ## Installation
 
@@ -257,7 +257,7 @@ The evaluator (`evaluation/f1_evaluator.py`) is the one used in the thesis; an i
 
 ### Test Dataset
 
-`data/test_dataset.json` contains **100 annotated questions**. It is the test set of the first evaluation, used in the thesis as a **regression set**; the final evaluation used a separate test set of 86 questions, frozen before the systems were revised (thesis, Chapter 6).
+`data/test_dataset.json` contains **100 annotated questions**. It is the test set of the first evaluation, used in the thesis as a **regression set**; the final evaluation used a separate test set of 86 questions, frozen before the systems were revised (thesis, Chapter 6). The three question sets, the evaluation reports and the analysis scripts are published in [liita-nl2sparql-evaluation](https://github.com/tonazzog/liita-nl2sparql-evaluation).
 
 | Category | Count | Examples |
 |---|---|---|
