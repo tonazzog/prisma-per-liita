@@ -589,7 +589,7 @@ LIMIT 10""",
 
                 with gr.Row():
                     provider_dropdown = gr.Dropdown(
-                        choices=["mistral", "anthropic", "openai", "gemini", "ollama"],
+                        choices=["mistral", "anthropic", "openai", "gemini", "ollama", "claudecode"],
                         value="mistral",
                         label="Provider",
                     )
@@ -648,7 +648,7 @@ def main():
     parser.add_argument(
         "--provider", "-p",
         default="mistral",
-        choices=["openai", "anthropic", "mistral", "gemini", "ollama"],
+        choices=["openai", "anthropic", "mistral", "gemini", "ollama", "claudecode"],
         help="LLM provider (default: mistral)"
     )
     parser.add_argument(
